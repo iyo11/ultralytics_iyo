@@ -70,6 +70,8 @@ from ultralytics.nn.modules import (
     v10Detect, MetaNeXtStage,
 )
 from ultralytics.nn.modules.C_Fasters import C3_Faster, C2f_Faster, C3_Faster_GELUv2, C2f_Faster_GELUv2
+from ultralytics.nn.modules.Fusion11 import MFAM, PCMFAM
+from ultralytics.nn.modules.LCNet import LCNetTimm
 from ultralytics.nn.modules.Strip_RCNN import C2f_Strip, C2f_StripCGLU
 from ultralytics.nn.modules.FFCA import *
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
@@ -1563,7 +1565,10 @@ def parse_model(d, ch, verbose=True):
             C2f_StripCGLU,
             C3_Faster_GELUv2,
             C2f_Faster_GELUv2,
-            MetaNeXtStage
+            MetaNeXtStage,
+            LCNetTimm,
+            MFAM,
+            PCMFAM
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments

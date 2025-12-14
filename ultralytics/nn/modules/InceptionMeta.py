@@ -106,7 +106,6 @@ class MetaNeXtBlock(nn.Module):
         drop_path (float): Stochastic depth rate. Default: 0.0
         ls_init_value (float): Init value for Layer Scale. Default: 1e-6.
     """
-
     def __init__(
             self,
             dim,
