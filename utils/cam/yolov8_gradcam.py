@@ -71,23 +71,39 @@ def resolve_layer(det_model: torch.nn.Module, layer_expr: str):
 
 class YOLOBoxScoreTarget:
     """
-    给 pytorch-grad-cam 用的 target：
-    - 用某个 det（第 i 个候选）的 max class logit 当作目标
-    - 可选：叠加 box 的 4 个回传（更接近你原来的 all）
+    ✅ 修复版 target：
+    - 必须从 pytorch-grad-cam 内部 forward 得到的 model_output 里取分数
+    - det_index_in_raw：原始 N 个候选里的索引（不是排序后的 i）
+    - mode: 'class' | 'box' | 'all'
     """
-    def __init__(self, logits_sorted, boxes_sorted, index: int, mode: str = "class"):
-        self.logits_sorted = logits_sorted
-        self.boxes_sorted = boxes_sorted
-        self.index = index
+    def __init__(self, det_index_in_raw: int, nc: int, mode: str = "class"):
+        self.det_i = int(det_index_in_raw)
+        self.nc = int(nc)
         self.mode = mode
 
     def __call__(self, model_output):
+        # model_output 可能是 list/tuple
+        if isinstance(model_output, (list, tuple)):
+            model_output = model_output[0]
+
+        # 统一成 [1, N, C]
+        if model_output.dim() != 3 or model_output.size(0) != 1:
+            raise RuntimeError(f"model_output 形状不符合预期：{tuple(model_output.shape)}")
+
+        # 如果是 [1, C, N]，转成 [1, N, C]
+        if model_output.shape[1] < model_output.shape[2]:
+            model_output = model_output.permute(0, 2, 1).contiguous()
+
+        x = model_output[0, self.det_i]  # [C]
+        boxes = x[:4]
+        logits = x[4:4 + self.nc]
+
         if self.mode == "class":
-            return self.logits_sorted[self.index].max()
+            return logits.max()
         elif self.mode == "box":
-            return self.boxes_sorted[self.index].sum()
-        else:  # all
-            return self.logits_sorted[self.index].max() + self.boxes_sorted[self.index].sum()
+            return boxes.sum()
+        else:
+            return logits.max() + boxes.sum()
 
 
 class YOLOv8GradCAM:
@@ -107,7 +123,7 @@ class YOLOv8GradCAM:
 
         yolo = YOLO(weight)
 
-        # 打印“训练时那种”block级结构（简洁版）
+        # 打印 block 级结构（用于选 layer）
         if print_blocks:
             m0 = yolo.model
             blocks = getattr(m0, "model", None)
@@ -128,11 +144,23 @@ class YOLOv8GradCAM:
         self.ratio = float(ratio)
         self.imgsz = int(imgsz)
 
+        # Detect head 的 nc（最稳）
+        self.nc = None
+        try:
+            self.nc = getattr(self.model.model[-1], "nc", None)
+        except Exception:
+            self.nc = None
+
         method_cls = eval(method)
         self.cam = method_cls(model=self.model, target_layers=[self.target_layer])
 
+        print("\n你选择的 target layer 是：", layer)
+        print("层类型：", self.target_layer.__class__.__name__)
+        print("层结构：\n", self.target_layer)
+        p = sum(x.numel() for x in self.target_layer.parameters())
+        print("该层参数量：", p)
+
     def _name(self, cid: int) -> str:
-        # names 可能是 dict 或 list
         if isinstance(self.names, dict):
             return self.names.get(cid, str(cid))
         return self.names[cid]
@@ -160,28 +188,22 @@ class YOLOv8GradCAM:
         if preds.dim() != 3 or preds.size(0) != 1:
             raise RuntimeError(f"preds 形状不符合预期：{tuple(preds.shape)}")
 
-        # ✅ 如果是 [B, C, N]（C 小、N 大），转成 [B, N, C]
+        # 如果是 [B, C, N]（C 小、N 大），转成 [B, N, C]
         if preds.shape[1] < preds.shape[2]:
             preds = preds.permute(0, 2, 1).contiguous()  # [1, N, C]
 
         preds = preds[0]  # [N, C]
         C = preds.shape[1]
 
-        # ✅ 优先用 Detect head 里的 nc（最稳）
-        nc = None
-        try:
-            # 通常最后一个 block 是 Detect
-            nc = getattr(self.model.model[-1], "nc", None)
-        except Exception:
-            nc = None
+        # nc 优先来自 Detect head
+        nc = self.nc
         if nc is None:
-            nc = C - 4  # 兜底：假设 C=4+nc
-
+            nc = C - 4
         if C < 4 + nc:
             raise RuntimeError(f"通道数不够：C={C}, nc={nc}，无法切分 boxes/cls。")
 
         boxes = preds[:, :4]            # [N,4]
-        logits = preds[:, 4:4 + nc]     # [N,nc] 只取类别部分
+        logits = preds[:, 4:4 + nc]     # [N,nc]
 
         conf = logits.max(dim=1).values
         sorted_conf, idx = torch.sort(conf, descending=True)
@@ -189,7 +211,29 @@ class YOLOv8GradCAM:
         logits_sorted = logits[idx]
         boxes_sorted = boxes[idx]
         boxes_xyxy = xywh2xyxy(boxes_sorted).detach().cpu().numpy()
-        return logits_sorted, boxes_sorted, boxes_xyxy, sorted_conf
+        return logits_sorted, boxes_sorted, boxes_xyxy, sorted_conf, idx, nc
+
+    def debug_layer_output_shape(self, img_path):
+        img_rgb, tensor = self._preprocess(img_path)
+
+        feats = {}
+
+        def hook_fn(m, inp, out):
+            if isinstance(out, (list, tuple)):
+                feats["out"] = [tuple(x.shape) for x in out if hasattr(x, "shape")]
+            else:
+                feats["out"] = tuple(out.shape)
+
+        h = self.target_layer.register_forward_hook(hook_fn)
+
+        with torch.no_grad():
+            _ = self.model(tensor)
+
+        h.remove()
+
+        print("\n=== Layer Debug ===")
+        print("layer expr:", self.target_layer)
+        print("output shape:", feats.get("out", "没抓到输出（可能该层没走到或输出不是Tensor）"))
 
     def __call__(self, img_path, save_path="./cam_results"):
         if os.path.exists(save_path):
@@ -198,13 +242,13 @@ class YOLOv8GradCAM:
 
         img_rgb, tensor = self._preprocess(img_path)
 
-        # ✅ 必须允许梯度
+        # ✅ grad-cam 需要梯度
         torch.set_grad_enabled(True)
         tensor.requires_grad_(True)
 
-        # forward 一次拿 preds（用于排序/挑 target）
+        # 第一次 forward：只用于排序挑选 topk
         preds = self.model(tensor)
-        logits_sorted, boxes_sorted, boxes_xyxy, sorted_conf = self._postprocess_sort(preds)
+        logits_sorted, boxes_sorted, boxes_xyxy, sorted_conf, idx_sorted, nc = self._postprocess_sort(preds)
 
         topk = max(1, int(logits_sorted.size(0) * self.ratio))
 
@@ -213,9 +257,10 @@ class YOLOv8GradCAM:
             if float(sorted_conf[i]) < self.conf_threshold:
                 break
 
-            targets = [YOLOBoxScoreTarget(logits_sorted, boxes_sorted, i, self.backward_type)]
+            # ✅ 关键：把 “原始候选索引” 传给 target，让它在 CAM 内部 forward 的 model_output 里取分数
+            raw_i = int(idx_sorted[i].item())
+            targets = [YOLOBoxScoreTarget(raw_i, nc, self.backward_type)]
 
-            # ✅ 由 grad-cam 自己算 cam（返回 [B,H,W] numpy）
             grayscale_cam = self.cam(input_tensor=tensor, targets=targets)
             cam_map = grayscale_cam[0]  # [H,W]
 
@@ -237,11 +282,11 @@ class YOLOv8GradCAM:
 
 def get_params():
     return dict(
-        weight="../../pts/v8m_best.pt",
+        weight="../../pts/v8n_fusion11_t1_best.pt",
         device="cuda:0",
-        method="GradCAM",
-        layer="model.model[9]",     # 改成 model.model[xx] 选你要的 block
-        backward_type="all",         # class / box / all
+        method="XGradCAM",          # 如果仍然偏弱，可试 XGradCAM / EigenCAM
+        layer="model.model[15]",   # 你之前 debug 的 PCMFAM 是 19（日志里显示 19: PCMFAM）
+        backward_type="all",       # class / box / all
         conf_threshold=0.6,
         ratio=0.05,
         imgsz=640,
@@ -254,7 +299,10 @@ if __name__ == "__main__":
     cam = YOLOv8GradCAM(**params)
 
     img_path = "E:/datas/vehicle/images/val2017/20080816144810-01005438_7_4.jpg"
-    save_dir = "./cam_results"
 
+    # 可选：先看输出特征图 shape
+    cam.debug_layer_output_shape(img_path)
+
+    save_dir = "./cam_results"
     n = cam(img_path, save_dir)
     print(f"Saved {n} CAM images to: {os.path.abspath(save_dir)}")

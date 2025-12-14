@@ -9,81 +9,43 @@ __all__ = (
     "PCMFAM"
 )
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
 def dwconv(ch, k, stride=1, padding=0, bias=False):
     return nn.Conv2d(ch, ch, k, stride=stride, padding=padding, groups=ch, bias=bias)
 
 
-class ConvBNAct(nn.Module):
-    def __init__(self, in_ch, out_ch, k=1, s=1, p=0, act=True):
+def get_norm(norm, ch, gn_groups=8):
+    norm = (norm or "bn").lower()
+    if norm == "bn":
+        return nn.BatchNorm2d(ch)
+    if norm == "gn":
+        # groups 不要超过通道数，且要整除
+        g = min(gn_groups, ch)
+        while ch % g != 0 and g > 1:
+            g -= 1
+        return nn.GroupNorm(g, ch)
+    if norm in ("none", "identity"):
+        return nn.Identity()
+    raise ValueError(f"Unknown norm: {norm}")
+
+
+class ConvNormAct(nn.Module):
+    def __init__(self, in_ch, out_ch, k=1, s=1, p=0, act=True, norm="bn", gn_groups=8):
         super().__init__()
         self.conv = nn.Conv2d(in_ch, out_ch, k, s, p, bias=False)
-        self.bn = nn.BatchNorm2d(out_ch)
+        self.norm = get_norm(norm, out_ch, gn_groups)
         self.act = nn.SiLU(inplace=True) if act else nn.Identity()
 
     def forward(self, x):
-        return self.act(self.bn(self.conv(x)))
+        return self.act(self.norm(self.conv(x)))
 
-
-class MFAM(nn.Module):
-    """
-    改动点：
-    - 仍然保留“捷径分支”概念（id）
-    - 但不再用 AvgPool2d(kernel_size=stride, stride=stride)
-    - 而是把输入 x 自适应池化到与主分支输出同尺寸（永远合法，不会 0x0）
-    """
-    def __init__(self, channels, stride=1, out_channels=None, act=True):
-        super().__init__()
-        out_channels = out_channels if out_channels is not None else channels
-        self.stride = stride
-
-        self.b0 = nn.Sequential(
-            dwconv(channels, 3, stride=stride, padding=1),
-            nn.BatchNorm2d(channels),
-            nn.SiLU(inplace=True) if act else nn.Identity()
-        )
-
-        self.b1 = nn.Sequential(
-            dwconv(channels, 5, stride=stride, padding=2),
-            nn.BatchNorm2d(channels),
-            nn.SiLU(inplace=True) if act else nn.Identity()
-        )
-
-        self.b2 = nn.Sequential(
-            dwconv(channels, (1, 7), stride=stride, padding=(0, 3)),
-            nn.BatchNorm2d(channels),
-            nn.SiLU(inplace=True) if act else nn.Identity(),
-            dwconv(channels, (7, 1), stride=1, padding=(3, 0)),
-            nn.BatchNorm2d(channels),
-            nn.SiLU(inplace=True) if act else nn.Identity()
-        )
-
-        self.b3 = nn.Sequential(
-            dwconv(channels, (1, 9), stride=stride, padding=(0, 4)),
-            nn.BatchNorm2d(channels),
-            nn.SiLU(inplace=True) if act else nn.Identity(),
-            dwconv(channels, (9, 1), stride=1, padding=(4, 0)),
-            nn.BatchNorm2d(channels),
-            nn.SiLU(inplace=True) if act else nn.Identity()
-        )
-
-        self.fuse = ConvBNAct(channels, out_channels, k=1, s=1, p=0, act=act)
-
-    def _id_align(self, x, y_ref):
-        """
-        把 x 变成和 y_ref 一样的 (H, W)，用于残差相加。
-        这比“kernel=stride 的 AvgPool”更稳定：输入再小也不会崩。
-        """
-        if x.shape[-2:] == y_ref.shape[-2:]:
-            return x
-        return F.adaptive_avg_pool2d(x, output_size=y_ref.shape[-2:])
-
-    def forward(self, x):
-        y0 = self.b0(x)
-        y = y0 + self.b1(x) + self.b2(x) + self.b3(x) + self._id_align(x, y0)
-        return self.fuse(y)
 
 class ECA(nn.Module):
-    """超轻量通道注意力：ECA"""
+    """ECA: 超轻量通道注意力"""
     def __init__(self, channels, k_size=3):
         super().__init__()
         self.avg = nn.AdaptiveAvgPool2d(1)
@@ -100,67 +62,145 @@ class ECA(nn.Module):
 class PConv(nn.Module):
     """
     Partial Convolution：只对部分通道做 3x3 Conv，其余通道直通
+    改动：默认 ratio 提高（你也可传 1.0 全卷积）
     """
-    def __init__(self, channels, ratio=0.5, k=3, act=True):
+    def __init__(self, channels, ratio=1.0, k=3, act=True, norm="bn", gn_groups=8):
         super().__init__()
         c_conv = max(1, int(channels * ratio))
         c_id = channels - c_conv
         self.c_conv = c_conv
         self.c_id = c_id
 
-        self.conv = ConvBNAct(c_conv, c_conv, k=k, s=1, p=k//2, act=act)  # 普通卷积即可
+        self.conv = ConvNormAct(c_conv, c_conv, k=k, s=1, p=k//2, act=act, norm=norm, gn_groups=gn_groups)
 
     def forward(self, x):
+        if self.c_id <= 0:
+            return self.conv(x)
         x1, x2 = torch.split(x, [self.c_conv, self.c_id], dim=1)
         x1 = self.conv(x1)
         return torch.cat([x1, x2], dim=1)
 
 
+class MFAM(nn.Module):
+    """
+    MFAM 改进点：
+    1) 分支仍用 depthwise 做空间建模（省算力）
+    2) 每个分支后加一个 1x1（pointwise）做通道混合/对齐，再相加（避免“各玩各的+分布不齐”）
+    3) residual 的 id 分支使用 adaptive pool 对齐尺寸（保持你原来的稳定性）
+    """
+    def __init__(self, channels, stride=1, out_channels=None, act=True, norm="bn", gn_groups=8):
+        super().__init__()
+        out_channels = out_channels if out_channels is not None else channels
+        self.stride = stride
+
+        def dw_block(k, padding, stride_):
+            return nn.Sequential(
+                dwconv(channels, k, stride=stride_, padding=padding),
+                get_norm(norm, channels, gn_groups),
+                nn.SiLU(inplace=True) if act else nn.Identity(),
+                # ✅ 关键：分支内部做一次通道混合与分布对齐
+                ConvNormAct(channels, channels, k=1, s=1, p=0, act=act, norm=norm, gn_groups=gn_groups),
+            )
+
+        self.b0 = dw_block(3, 1, stride)
+        self.b1 = dw_block(5, 2, stride)
+
+        self.b2 = nn.Sequential(
+            dwconv(channels, (1, 7), stride=stride, padding=(0, 3)),
+            get_norm(norm, channels, gn_groups),
+            nn.SiLU(inplace=True) if act else nn.Identity(),
+            dwconv(channels, (7, 1), stride=1, padding=(3, 0)),
+            get_norm(norm, channels, gn_groups),
+            nn.SiLU(inplace=True) if act else nn.Identity(),
+            ConvNormAct(channels, channels, k=1, s=1, p=0, act=act, norm=norm, gn_groups=gn_groups),
+        )
+
+        self.b3 = nn.Sequential(
+            dwconv(channels, (1, 9), stride=stride, padding=(0, 4)),
+            get_norm(norm, channels, gn_groups),
+            nn.SiLU(inplace=True) if act else nn.Identity(),
+            dwconv(channels, (9, 1), stride=1, padding=(4, 0)),
+            get_norm(norm, channels, gn_groups),
+            nn.SiLU(inplace=True) if act else nn.Identity(),
+            ConvNormAct(channels, channels, k=1, s=1, p=0, act=act, norm=norm, gn_groups=gn_groups),
+        )
+
+        self.fuse = ConvNormAct(channels, out_channels, k=1, s=1, p=0, act=act, norm=norm, gn_groups=gn_groups)
+
+    def _id_align(self, x, y_ref):
+        if x.shape[-2:] == y_ref.shape[-2:]:
+            return x
+        return F.adaptive_avg_pool2d(x, output_size=y_ref.shape[-2:])
+
+    def forward(self, x):
+        y0 = self.b0(x)
+        y = y0 + self.b1(x) + self.b2(x) + self.b3(x) + self._id_align(x, y0)
+        return self.fuse(y)
+
+
 class PCMFAM(nn.Module):
     """
-    一半走卷积增强：PConv -> MFAM
-    一半走注意力增强：ECA(或换SE/CoordAtt)
-    最后 concat -> 1x1 fuse，可选残差
+    PCMFAM 改进点（对应你 1~5 点）：
+    1) 默认 split_ratio 更大（更多通道走卷积分支）
+    2) 默认 pconv_ratio 更大（甚至 1.0 全部卷）
+    3) 注意力分支：先 1x1 再 ECA（先产生一点新组合再 re-weight）
+    4) MFAM 升级为 MFAMv2（分支相加前做通道混合/对齐）
+    5) 残差：x + gamma*y（gamma 初值 0，更稳、更容易学到“何时用模块”）
     """
-    def __init__(self, in_ch, out_ch=None, split_ratio=0.5,
-                 pconv_ratio=0.5, attn='eca', use_residual=True, act=True):
+    def __init__(self, in_ch, out_ch=None,
+                 split_ratio=0.75,          # ✅ 默认从 0.5 -> 0.75
+                 pconv_ratio=1.0,           # ✅ 默认从 0.5 -> 1.0
+                 attn='eca',
+                 use_residual=True,
+                 act=True,
+                 norm="bn",                 # 小 batch 可改 "gn"
+                 gn_groups=8):
         super().__init__()
         out_ch = out_ch if out_ch is not None else in_ch
+
         c_conv = max(1, int(in_ch * split_ratio))
         c_att = in_ch - c_conv
         self.c_conv = c_conv
         self.c_att = c_att
         self.use_residual = use_residual and (out_ch == in_ch)
 
-        # 卷积分支：PConv + MFAM
-        self.pconv = PConv(c_conv, ratio=pconv_ratio, k=3, act=act)
-        self.mfam = MFAM(c_conv, stride=1, out_channels=c_conv, act=act)
+        # 卷积分支：PConv + MFAMv2
+        self.pconv = PConv(c_conv, ratio=pconv_ratio, k=3, act=act, norm=norm, gn_groups=gn_groups)
+        self.mfam = MFAM(c_conv, stride=1, out_channels=c_conv, act=act, norm=norm, gn_groups=gn_groups)
 
-        # 注意力分支：默认 ECA（你也可以换 SE/CBAM/CoordAtt）
-        if attn.lower() == 'eca':
-            self.attn = ECA(c_att, k_size=3) if c_att > 0 else nn.Identity()
+        # 注意力分支：✅ 1x1 -> ECA
+        if c_att > 0 and attn.lower() == "eca":
+            self.attn_pre = ConvNormAct(c_att, c_att, k=1, s=1, p=0, act=act, norm=norm, gn_groups=gn_groups)
+            self.attn = ECA(c_att, k_size=3)
         else:
-            # 兜底：不想要注意力就传 attn='none'
+            self.attn_pre = nn.Identity()
             self.attn = nn.Identity()
 
         # 融合
-        self.fuse = ConvBNAct(in_ch, out_ch, k=1, s=1, p=0, act=act)
+        self.fuse = ConvNormAct(in_ch, out_ch, k=1, s=1, p=0, act=act, norm=norm, gn_groups=gn_groups)
+
+        # ✅ 残差缩放系数（初值 0：一开始像 identity，训练更稳）
+        self.gamma = nn.Parameter(torch.zeros(1)) if self.use_residual else None
 
     def forward(self, x):
         if self.c_att == 0:
             y = self.mfam(self.pconv(x))
             y = self.fuse(y)
-            return x + y if self.use_residual else y
+            if self.use_residual:
+                return x + self.gamma * y
+            return y
 
         x_conv, x_att = torch.split(x, [self.c_conv, self.c_att], dim=1)
 
         y_conv = self.mfam(self.pconv(x_conv))
-        y_att = self.attn(x_att)
+        y_att = self.attn(self.attn_pre(x_att))
 
         y = torch.cat([y_conv, y_att], dim=1)
         y = self.fuse(y)
-        return x + y if self.use_residual else y
 
+        if self.use_residual:
+            return x + self.gamma * y
+        return y
 
 
 def main():
