@@ -72,6 +72,7 @@ from ultralytics.nn.modules import (
 from ultralytics.nn.modules.C_Fasters import C3_Faster, C2f_Faster, C3_Faster_GELUv2, C2f_Faster_GELUv2
 from ultralytics.nn.modules.Fusion11 import MFAM, PCMFAM
 from ultralytics.nn.modules.LCNet import LCNetTimm
+from ultralytics.nn.modules.PKINet import C2f_CAA
 from ultralytics.nn.modules.Strip_RCNN import C2f_Strip, C2f_StripCGLU
 from ultralytics.nn.modules.FFCA import *
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
@@ -1294,9 +1295,9 @@ def temporary_modules(modules=None, attributes=None):
         attributes (dict, optional): A dictionary mapping old module attributes to new module attributes.
 
     Examples:
-        >>> with temporary_modules({"old.module": "new.module"}, {"old.module.attribute": "new.module.attribute"}):
-        >>> import old.module  # this will now import new.module
-        >>> from old.module import attribute  # this will now import new.module.attribute
+        # >>> with temporary_modules({"old.module": "new.module"}, {"old.module.attribute": "new.module.attribute"}):
+        # >>> import old.module  # this will now import new.module
+        # >>> from old.module import attribute  # this will now import new.module.attribute
 
     Notes:
         The changes are only in effect inside the context manager and are undone once the context manager exits.
@@ -1568,7 +1569,8 @@ def parse_model(d, ch, verbose=True):
             MetaNeXtStage,
             LCNetTimm,
             MFAM,
-            PCMFAM
+            PCMFAM,
+            C2f_CAA
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1593,7 +1595,8 @@ def parse_model(d, ch, verbose=True):
             C2f_Strip,
             C2f_StripCGLU,
             C3_Faster_GELUv2,
-            C2f_Faster_GELUv2
+            C2f_Faster_GELUv2,
+            C2f_CAA
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args

@@ -203,51 +203,19 @@ class PCMFAM(nn.Module):
         return y
 
 
-def main():
-    torch.manual_seed(0)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("Device:", device)
-
-    # ====== 1) 测 PCMFAM（最常用）======
-    B, C, H, W = 2, 64, 80, 80
-    x = torch.randn(B, C, H, W, device=device)
-
-    print("\n=== Test: PCMFAM (residual on, out_ch=in_ch) ===")
-    m1 = PCMFAM(in_ch=C, out_ch=C, split_ratio=0.5, pconv_ratio=0.5, attn="eca", use_residual=True).to(device)
-    y1 = m1(x)
-    print("Input :", tuple(x.shape))
-    print("Output:", tuple(y1.shape))
-    assert y1.shape == x.shape, "PCMFAM residual版：输出shape应与输入一致"
-
-    loss = y1.mean()
-    loss.backward()
-    grad_ok = any(p.grad is not None and torch.isfinite(p.grad).all() for p in m1.parameters())
-    print("Backward OK:", grad_ok)
-
-    # ====== 2) 测 PCMFAM（改变 out_ch，自动关闭 residual）======
-    print("\n=== Test: PCMFAM (out_ch != in_ch, residual off automatically) ===")
-    out_ch = 96
-    m2 = PCMFAM(in_ch=C, out_ch=out_ch, split_ratio=0.5, pconv_ratio=0.5, attn="eca", use_residual=True).to(device)
-    y2 = m2(x)
-    print("Output:", tuple(y2.shape))
-    assert y2.shape == (B, out_ch, H, W), "PCMFAM改通道数：输出通道不匹配"
-
-    # ====== 3) 测 PCMFAM（split_ratio=1.0，纯卷积分支；c_att=0 分支覆盖）======
-    print("\n=== Test: PCMFAM (split_ratio=1.0, conv-only path) ===")
-    m3 = PCMFAM(in_ch=C, out_ch=C, split_ratio=1.0, pconv_ratio=0.5, attn="eca", use_residual=True).to(device)
-    y3 = m3(x)
-    print("Output:", tuple(y3.shape))
-    assert y3.shape == x.shape, "纯卷积分支：输出shape应与输入一致"
-
-    # ====== 4) 单测 MFAM stride=2（空间降采样）======
-    print("\n=== Test: MFAM stride=2 (downsample) ===")
-    mfam = MFAM(channels=C, stride=2, out_channels=C).to(device)
-    y4 = mfam(x)
-    print("Output:", tuple(y4.shape))
-    assert y4.shape == (B, C, H // 2, W // 2), "MFAM stride=2：输出分辨率不对"
-
-    print("\nAll tests passed ✅")
-
 if __name__ == "__main__":
-    main()
+    from torchsummary import summary
+    import torch
+    from thop import profile
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model = PCMFAM(3, 64).to(device)
+    x = torch.randn(1, 3, 224, 224).to(device)
+    summary(model, (3, 224, 224))
+    #输出模块计算量
+
+    flops, params = profile(model, inputs=(x,), verbose=False)
+
+    print(f"\nParams: {params / 1e6:.4f} M")
+    print(f"FLOPs:  {flops / 1e9:.4f} G")
