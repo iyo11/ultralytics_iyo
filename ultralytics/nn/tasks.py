@@ -69,6 +69,7 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     v10Detect,
 )
+from ultralytics.nn.modules.v11.InceptionNeXt import InceptionDWConv2d
 from ultralytics.nn.modules.v11.PATConv import PATConvC3k2, PATConv
 from ultralytics.nn.modules.v11.StripConv import StripConvC3k2, DSC3k_StripBlock
 from ultralytics.nn.modules.v11.StripConvHead import Detect_StripConvHead
@@ -1578,7 +1579,8 @@ def parse_model(d, ch, verbose=True):
             PATConvC3k2,
             PATConv,
             StripConvC3k2,
-            DSC3k_StripBlock
+            DSC3k_StripBlock,
+            InceptionDWConv2d
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1608,7 +1610,8 @@ def parse_model(d, ch, verbose=True):
             PATConvC3k2,
             PATConv,
             StripConvC3k2,
-            DSC3k_StripBlock
+            DSC3k_StripBlock,
+            InceptionDWConv2d
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args

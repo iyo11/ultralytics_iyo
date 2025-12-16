@@ -1,6 +1,21 @@
 import warnings
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    module="torch"
+)
+warnings.filterwarnings(
+    "ignore",
+    category=FutureWarning,
+    module="timm"
+)
 
-warnings.filterwarnings('ignore')
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    module="mmengine"
+)
+
 from ultralytics import YOLO
 
 
