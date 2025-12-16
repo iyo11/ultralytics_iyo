@@ -111,7 +111,7 @@ class Detect_StripConvHead(nn.Module):
             torch.cat((self.one2one_cv2[i](x_detach[i]), self.one2one_cv3[i](x_detach[i])), 1) for i in range(self.nl)
         ]
         for i in range(self.nl):
-            x[i] = self.RFAConv[i](x[i])
+            x[i] = self.StripConv[i](x[i])
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
         if self.training:  # Training path
             return {"one2many": x, "one2one": one2one}
