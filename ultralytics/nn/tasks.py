@@ -70,6 +70,7 @@ from ultralytics.nn.modules import (
     v10Detect,
 )
 from ultralytics.nn.modules.v11.PATConv import PATConvC3k2, PATConv
+from ultralytics.nn.modules.v11.StripConvHead import Detect_StripConvHead
 from ultralytics.nn.modules.v8.C_Fasters import C3_Faster, C2f_Faster, C3_Faster_GELUv2, C2f_Faster_GELUv2
 from ultralytics.nn.modules.v8.Fusion11 import MFAM, PCMFAM
 from ultralytics.nn.modules.v8.LCNet import LCNetTimm
@@ -398,7 +399,7 @@ class DetectionModel(BaseModel):
 
         # Build strides
         m = self.model[-1]  # Detect()
-        if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, YOLOEDetect, YOLOESegment
+        if isinstance(m, (Detect, Segment, YOLOESegment, Pose, OBB, Detect_StripConvHead)):  # includes all Detect subclasses like Segment, Pose, OBB, YOLOEDetect, YOLOESegment
             s = 256  # 2x min stride
             m.inplace = self.inplace
 
@@ -1655,7 +1656,9 @@ def parse_model(d, ch, verbose=True):
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
         elif m in frozenset(
-            {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}
+            {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect,
+             Detect_StripConvHead
+             }
         ):
             args.append([ch[x] for x in f])
             if m is Segment or m is YOLOESegment:
@@ -1761,6 +1764,8 @@ def guess_model_task(model):
             return "pose"
         if m == "obb":
             return "obb"
+        else:
+            return "detect"
 
     # Guess from model cfg
     if isinstance(model, dict):
@@ -1783,7 +1788,7 @@ def guess_model_task(model):
                 return "pose"
             elif isinstance(m, OBB):
                 return "obb"
-            elif isinstance(m, (Detect, WorldDetect, YOLOEDetect, v10Detect)):
+            elif isinstance(m, (Detect, WorldDetect, YOLOEDetect, v10Detect, Detect_StripConvHead)):
                 return "detect"
 
     # Guess from model filename

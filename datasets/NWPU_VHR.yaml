@@ -1,4 +1,4 @@
-path: NWPU_VHR
+path: ../datas/NWPU_VHR
 train: images/train
 val: images/valid
 test: images/test
@@ -6,12 +6,12 @@ test: images/test
 # Classes
 names:
   0: airplane
-  1: ship
+  1: baseball diamond
   2: storage tank
-  3: baseball diamond
-  4: tennis court
-  5: basketball court
-  6: ground track field
-  7: harbor
-  8: bridge
+  3: bridge
+  4: ground track field
+  5: harbor
+  6: ship
+  7: storage tank
+  8: tennis court
   9: vehicle
