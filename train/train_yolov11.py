@@ -40,4 +40,6 @@ if __name__ == '__main__':
                 project='../runs/train',
                 name='exp',
                 save_period=10,
+                #固定随机种子
+                seed=42
                 )

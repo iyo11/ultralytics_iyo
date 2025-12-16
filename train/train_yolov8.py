@@ -40,4 +40,5 @@ if __name__ == '__main__':
                 project='../runs/train',
                 name='exp',
                 save_period=10,
+                seed=42
                 )
