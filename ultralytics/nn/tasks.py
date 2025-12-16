@@ -67,14 +67,16 @@ from ultralytics.nn.modules import (
     WorldDetect,
     YOLOEDetect,
     YOLOESegment,
-    v10Detect, MetaNeXtStage,
+    v10Detect,
 )
-from ultralytics.nn.modules.C_Fasters import C3_Faster, C2f_Faster, C3_Faster_GELUv2, C2f_Faster_GELUv2
-from ultralytics.nn.modules.Fusion11 import MFAM, PCMFAM
-from ultralytics.nn.modules.LCNet import LCNetTimm
-from ultralytics.nn.modules.PKINet import C2f_CAA
-from ultralytics.nn.modules.Strip_RCNN import C2f_Strip, C2f_StripCGLU
-from ultralytics.nn.modules.FFCA import *
+from ultralytics.nn.modules.v11.PATConv import PATConvC3k2, PATConv
+from ultralytics.nn.modules.v8.C_Fasters import C3_Faster, C2f_Faster, C3_Faster_GELUv2, C2f_Faster_GELUv2
+from ultralytics.nn.modules.v8.Fusion11 import MFAM, PCMFAM
+from ultralytics.nn.modules.v8.LCNet import LCNetTimm
+from ultralytics.nn.modules.v8.PKINet import C2f_CAA
+from ultralytics.nn.modules.v8.Strip_RCNN import C2f_Strip, C2f_StripCGLU
+from ultralytics.nn.modules.v8.InceptionMeta import MetaNeXtStage
+from ultralytics.nn.modules.v8.FFCA import *
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
@@ -1570,7 +1572,9 @@ def parse_model(d, ch, verbose=True):
             LCNetTimm,
             MFAM,
             PCMFAM,
-            C2f_CAA
+            C2f_CAA,
+            PATConvC3k2,
+            PATConv
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1596,7 +1600,9 @@ def parse_model(d, ch, verbose=True):
             C2f_StripCGLU,
             C3_Faster_GELUv2,
             C2f_Faster_GELUv2,
-            C2f_CAA
+            C2f_CAA,
+            PATConvC3k2,
+            PATConv
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args

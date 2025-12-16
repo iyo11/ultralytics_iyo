@@ -5,7 +5,7 @@ from ultralytics.nn.modules.block import C2f
 from timm.models.layers import DropPath
 import torch.nn as nn
 
-from ultralytics.nn.modules.TC_GLU import ConvolutionalGLU
+from ultralytics.nn.modules.v8.TC_GLU import ConvolutionalGLU
 
 
 __all__ = {

@@ -11,7 +11,7 @@ __all__ = {
     'C2f_Faster_CGLU'
 }
 
-from ultralytics.nn.modules.C_Fasters import Partial_conv3
+from ultralytics.nn.modules.v8.C_Fasters import Partial_conv3
 
 
 ######################################## TransNeXt Convolutional GLU start ########################################
