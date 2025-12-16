@@ -70,6 +70,7 @@ from ultralytics.nn.modules import (
     v10Detect,
 )
 from ultralytics.nn.modules.v11.PATConv import PATConvC3k2, PATConv
+from ultralytics.nn.modules.v11.StripConv import StripConvC3k2, DSC3k_StripBlock
 from ultralytics.nn.modules.v11.StripConvHead import Detect_StripConvHead
 from ultralytics.nn.modules.v8.C_Fasters import C3_Faster, C2f_Faster, C3_Faster_GELUv2, C2f_Faster_GELUv2
 from ultralytics.nn.modules.v8.Fusion11 import MFAM, PCMFAM
@@ -1575,7 +1576,9 @@ def parse_model(d, ch, verbose=True):
             PCMFAM,
             C2f_CAA,
             PATConvC3k2,
-            PATConv
+            PATConv,
+            StripConvC3k2,
+            DSC3k_StripBlock
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1603,7 +1606,9 @@ def parse_model(d, ch, verbose=True):
             C2f_Faster_GELUv2,
             C2f_CAA,
             PATConvC3k2,
-            PATConv
+            PATConv,
+            StripConvC3k2,
+            DSC3k_StripBlock
         }
     )
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
