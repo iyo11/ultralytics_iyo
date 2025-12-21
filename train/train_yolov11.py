@@ -1,20 +1,8 @@
 import warnings
-warnings.filterwarnings(
-    "ignore",
-    category=DeprecationWarning,
-    module="torch"
-)
-warnings.filterwarnings(
-    "ignore",
-    category=FutureWarning,
-    module="timm"
-)
+warnings.simplefilter("ignore")          # 比 filterwarnings("ignore") 更“总开关”
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-warnings.filterwarnings(
-    "ignore",
-    category=DeprecationWarning,
-    module="mmengine"
-)
+
 
 from ultralytics import YOLO
 
@@ -32,20 +20,24 @@ else:
     workers = 10
     cacheTF =  True
 
+epoch_count = 150
+close_mosaic_count = 150
 
 if __name__ == '__main__':
     #model = YOLO('yolov8n.yaml')
-    model = YOLO('../models/v11/yolov11n_InceptionMetaNeXt.yaml')
+    model = YOLO('../models/v11/yolov11n_LitePKIBlock_eca.yaml')
     # 如何切换模型版本, 上面的ymal文件可以改为 yolov8s.yaml就是使用的v8s,
     # 类似某个改进的yaml文件名称为yolov8-XXX.yaml那么如果想使用其它版本就把上面的名称改为yolov8l-XXX.yaml即可（改的是上面YOLO中间的名字不是配置文件的）！
     # model.load('yolov8n.pt') # 是否加载预训练权重,科研不建议大家加载否则很难提升精度
-    model.train(data= datasets_path + '/VisDrone.yaml',
+    model.train(data= datasets_path + '/NWPU_VHR.yaml',
                 cache=cacheTF,
                 imgsz=640,
-                epochs=200,
+                epochs=epoch_count,
                 single_cls=False,  # 是否是单类别检测
                 batch=batch_size,
-                close_mosaic=10,
+                close_mosaic=close_mosaic_count,
+                mosaic=0.0,
+                mixup=0.0,
                 workers=workers,
                 device='0',
                 optimizer='SGD', # using SGD

@@ -108,10 +108,14 @@ class DFLoss(nn.Module):
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses for bounding boxes."""
 
-    def __init__(self, reg_max: int = 16):
+    def __init__(self, reg_max: int = 16, gcd_loss = False, iou_ratio = 1.0):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+        self.gcd_loss = GCDLoss
+        self.iou_ratio = iou_ratio
+        if gcd_loss:
+            print("Loss: GCDLoss")
 
     def forward(
         self,
@@ -133,6 +137,11 @@ class BboxLoss(nn.Module):
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
             loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
             loss_dfl = loss_dfl.sum() / target_scores_sum
+        if self.gcd_loss:
+            # print("Loss: GCDLoss")
+            gcd = self.gcd_loss(pred_bboxes[fg_mask], target_bboxes[fg_mask])
+            gcd_l = ((1.0 - gcd) * weight).sum() / target_scores_sum * 0.0002
+            loss_iou = self.iou_ratio * loss_iou + (1 - self.iou_ratio) * gcd_l
         else:
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
 
@@ -192,15 +201,20 @@ class KeypointLoss(nn.Module):
 
 
 class v8DetectionLoss:
-    """Criterion class for computing training losses for YOLOv8 object detection."""
+    """Criterion class for computing training losses."""
 
-    def __init__(self, model, tal_topk: int = 10):  # model must be de-paralleled
-        """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings."""
+    def __init__(self, model, tal_topk=10):  # model must be de-paralleled
+        """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
 
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
+
+        # self.bce = SlideLoss(nn.BCEWithLogitsLoss(reduction='none')) # SlideLoss   如果不注释使用的就是SlideLoss损失失函数
+        # self.bce = FocalLoss(nn.BCEWithLogitsLoss(reduction='none')) # FocalLoss   如果不注释使用的就是FocalLoss损失失函数
+        # self.bce = AdaptiveThresholdFocalLoss(nn.BCEWithLogitsLoss(reduction="none"))  # ATFLoss   如果不注释使用的就是ATFLoss损失失函数
+
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -210,9 +224,17 @@ class v8DetectionLoss:
 
         self.use_dfl = m.reg_max > 1
 
+        # self.nwdloss = self.hyp.nwdloss
+        self.iou_ratio = self.hyp.iou_ratio
+
+        self.gcd_loss = self.hyp.gcdloss
+
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = BboxLoss(m.reg_max).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max, gcd_loss=self.gcd_loss, iou_ratio=self.iou_ratio,).to(device)
+
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+
+
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -849,3 +871,35 @@ class TVPSegmentLoss(TVPDetectLoss):
         vp_loss = self.vp_criterion((vp_feats, pred_masks, proto), batch)
         cls_loss = vp_loss[0][2]
         return cls_loss, vp_loss[1]
+
+
+def GCDLoss(P, T, eps=1e-7):
+    """
+    计算两个高斯分布之间的 GCD 损失度量
+    P 和 T 是两个边界框，形状为 (N, 4)，表示 N 个边界框，每个边界框由 (x_min, y_min, x_max, y_max) 表示
+    P 和 T 是 PyTorch 张量
+    """
+    # 计算边界框中心
+    Cp = (P[:, :2] + P[:, 2:]) / 2  # P的中心
+    Ct = (T[:, :2] + T[:, 2:]) / 2  # T的中心
+
+    # 计算宽度和高度
+    Wp, Hp = P[:, 2] - P[:, 0], P[:, 3] - P[:, 1]
+    Wt, Ht = T[:, 2] - T[:, 0], T[:, 3] - T[:, 1]
+
+    # 计算中心差异
+    deltaC = Cp - Ct
+
+    # 计算距离 D1 和 D2
+    D1 = torch.sqrt((deltaC[:, 0] / (Wp + eps)) ** 2 + (deltaC[:, 1] / (Hp + eps)) ** 2)
+    D2 = torch.sqrt((deltaC[:, 0] / (Wt + eps)) ** 2 + (deltaC[:, 1] / (Ht + eps)) ** 2)
+
+    # 计算宽度和高度差异
+    Dw = torch.sqrt(((Wp - Wt) / (Wp + eps)) ** 2 + ((Hp - Ht) / (Hp + eps)) ** 2)
+
+    # 计算 GCD 损失度量
+    GCD2 = (D1 + D2 + Dw) / 2
+
+    # 计算最终的 GCD 损失
+    Metric = 1 - torch.exp(-torch.sqrt(GCD2))
+    return Metric

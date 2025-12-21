@@ -69,14 +69,18 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     v10Detect,
 )
+from ultralytics.nn.modules.v11.FeatureFusion import FeatureFusion
 from ultralytics.nn.modules.v11.InceptionNeXt import InceptionDWConv2d
+from ultralytics.nn.modules.v11.LitePKIBlock import LitePKIBlock
+from ultralytics.nn.modules.v11.MRFA import MRFAConv, C3k2_MRFAConv
 from ultralytics.nn.modules.v11.PATConv import PATConvC3k2, PATConv
+from ultralytics.nn.modules.v11.PKIBlock import PKIBlock11
 from ultralytics.nn.modules.v11.StripConv import StripConvC3k2, DSC3k_StripBlock
 from ultralytics.nn.modules.v11.StripConvHead import Detect_StripConvHead
 from ultralytics.nn.modules.v8.C_Fasters import C3_Faster, C2f_Faster, C3_Faster_GELUv2, C2f_Faster_GELUv2
 from ultralytics.nn.modules.v8.Fusion11 import MFAM, PCMFAM
 from ultralytics.nn.modules.v8.LCNet import LCNetTimm
-from ultralytics.nn.modules.v8.PKINet import C2f_CAA
+from ultralytics.nn.modules.v8.PKINet import C2f_CAA, CAA , CAA_ , C3k2_CAA
 from ultralytics.nn.modules.v8.Strip_RCNN import C2f_Strip, C2f_StripCGLU
 from ultralytics.nn.modules.v8.InceptionMeta import MetaNeXtStage
 from ultralytics.nn.modules.v8.FFCA import *
@@ -1528,6 +1532,7 @@ def parse_model(d, ch, verbose=True):
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
     ch = [ch]
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
+
     base_modules = frozenset(
         {
             Classify,
@@ -1580,9 +1585,18 @@ def parse_model(d, ch, verbose=True):
             PATConv,
             StripConvC3k2,
             DSC3k_StripBlock,
-            InceptionDWConv2d
+            InceptionDWConv2d,
+            C3k2_CAA,
+            CAA,
+            CAA_,
+            MRFAConv,
+            C3k2_MRFAConv,
+            FeatureFusion,
+            PKIBlock11,
+            LitePKIBlock
         }
     )
+
     repeat_modules = frozenset(  # modules with 'repeat' arguments
         {
             BottleneckCSP,
@@ -1611,9 +1625,13 @@ def parse_model(d, ch, verbose=True):
             PATConv,
             StripConvC3k2,
             DSC3k_StripBlock,
-            InceptionDWConv2d
+            InceptionDWConv2d,
+            C3k2_CAA,
+            MRFAConv,
+            C3k2_MRFAConv,
         }
     )
+
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
         m = (
             getattr(torch.nn, m[3:])
@@ -1622,78 +1640,142 @@ def parse_model(d, ch, verbose=True):
             if "torchvision.ops." in m
             else globals()[m]
         )  # get module
+
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
-        n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
-        if m in base_modules:
-            c1, c2 = ch[f], args[0]
-            if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
-                c2 = make_divisible(min(c2, max_channels) * width, 8)
-            if m is C2fAttn:  # set 1) embed channels and 2) num heads
-                args[1] = make_divisible(min(args[1], max_channels // 2) * width, 8)
-                args[2] = int(max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2])
 
-            args = [c1, c2, *args[1:]]
-            if m in repeat_modules:
-                args.insert(2, n)  # number of repeats
-                n = 1
-            if m is C3k2:  # for M/L/X sizes
-                legacy = False
-                if scale in "mlx":
-                    args[3] = True
-            if m is A2C2f:
-                legacy = False
-                if scale in "lx":  # for L/X sizes
-                    args.extend((True, 1.2))
-            if m is C2fCIB:
-                legacy = False
+        n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
+
+        if m in base_modules:
+
+            # ---------------- FeatureFusion (two-input) special case ----------------
+            if m is FeatureFusion:
+                # f must be like [idx1, idx2]
+                if not isinstance(f, (list, tuple)) or len(f) != 2:
+                    raise TypeError(f"FeatureFusion expects f as [from1, from2], got f={f} at layer {i}")
+
+                c_list = [ch[x] for x in f]
+                if c_list[0] != c_list[1]:
+                    raise ValueError(
+                        f"FeatureFusion expects same input channels, got {c_list} at layer {i}, f={f}"
+                    )
+
+                dim = c_list[0]
+
+                # Ensure args[0] == dim (important for different model scales)
+                if args:
+                    if args[0] != dim and verbose:
+                        LOGGER.warning(
+                            f"FeatureFusion dim arg {args[0]} != input channels {dim} at layer {i}, auto-fix to {dim}"
+                        )
+                    args[0] = dim
+                else:
+                    args = [dim]
+
+                c2 = dim  # output channels
+
+                # IMPORTANT: do NOT transform args to [c1, c2, ...] for FeatureFusion.
+                # It expects (dim, ...) not (c1, c2, ...)
+
+            # ---------------- All other base modules ----------------
+            else:
+                c1, c2 = ch[f], args[0]
+                if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
+                    c2 = make_divisible(min(c2, max_channels) * width, 8)
+
+                if m is C2fAttn:  # set 1) embed channels and 2) num heads
+                    args[1] = make_divisible(min(args[1], max_channels // 2) * width, 8)
+                    args[2] = int(
+                        max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2]
+                    )
+
+                args = [c1, c2, *args[1:]]
+                if m in repeat_modules:
+                    args.insert(2, n)  # number of repeats
+                    n = 1
+
+                if m is C3k2:  # for M/L/X sizes
+                    legacy = False
+                    if scale in "mlx":
+                        args[3] = True
+
+                if m is A2C2f:
+                    legacy = False
+                    if scale in "lx":  # for L/X sizes
+                        args.extend((True, 1.2))
+
+                if m is C2fCIB:
+                    legacy = False
+
         elif m is AIFI:
             args = [ch[f], *args]
+
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]
             if m is HGBlock:
                 args.insert(4, n)  # number of repeats
                 n = 1
+
         elif m is ResNetLayer:
             c2 = args[1] if args[3] else args[1] * 4
+
         elif m is torch.nn.BatchNorm2d:
             args = [ch[f]]
+
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+
         elif m in frozenset(
-            {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect,
-             Detect_StripConvHead
-             }
+            {
+                Detect,
+                WorldDetect,
+                YOLOEDetect,
+                Segment,
+                YOLOESegment,
+                Pose,
+                OBB,
+                ImagePoolingAttn,
+                v10Detect,
+                Detect_StripConvHead,
+            }
         ):
             args.append([ch[x] for x in f])
             if m is Segment or m is YOLOESegment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
             if m in {Detect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB}:
                 m.legacy = legacy
+
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
+
         elif m is CBLinear:
             c2 = args[0]
             c1 = ch[f]
             args = [c1, c2, *args[1:]]
+
         elif m is CBFuse:
             c2 = ch[f[-1]]
+
         elif m in frozenset({TorchVision, Index}):
             c2 = args[0]
             c1 = ch[f]
             args = [*args[1:]]
+
         elif m is SCAM:
             c2 = ch[f]
             args = [c2]
+
         elif m is FFM_Concat2:
             c2 = sum(ch[x] for x in f)
-            args = [args[0], c2//2, c2//2]
+            args = [args[0], c2 // 2, c2 // 2]
+
         elif m is FFM_Concat3:
             c2 = sum(ch[x] for x in f)
-            args = [args[0], c2//4, c2//2, c2//4]
+            args = [args[0], c2 // 4, c2 // 2, c2 // 4]
+
         else:
             c2 = ch[f]
 
@@ -1701,13 +1783,17 @@ def parse_model(d, ch, verbose=True):
         t = str(m)[8:-2].replace("__main__.", "")  # module type
         m_.np = sum(x.numel() for x in m_.parameters())  # number params
         m_.i, m_.f, m_.type = i, f, t  # attach index, 'from' index, type
+
         if verbose:
             LOGGER.info(f"{i:>3}{f!s:>20}{n_:>3}{m_.np:10.0f}  {t:<45}{args!s:<30}")  # print
+
         save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
         layers.append(m_)
+
         if i == 0:
             ch = []
         ch.append(c2)
+
     return torch.nn.Sequential(*layers), sorted(save)
 
 

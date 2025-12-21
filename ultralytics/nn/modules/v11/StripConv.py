@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from timm.models.layers import DropPath
-from mmcv.cnn import build_norm_layer
 from ultralytics.nn.modules import C3, C2f
 
 __all__ = ['StripConvC3k2', 'DSC3k2_StripBlock']
@@ -76,14 +75,11 @@ class Attention(nn.Module):
 
 
 class StripBlock(nn.Module):
-    def __init__(self, dim, mlp_ratio=4., k1=1, k2=19, drop=0., drop_path=0., act_layer=nn.GELU, norm_cfg=None):
+    def __init__(self, dim, mlp_ratio=4., k1=1, k2=19, drop=0., drop_path=0., act_layer=nn.GELU):
         super().__init__()
-        if norm_cfg:
-            self.norm1 = build_norm_layer(norm_cfg, dim)[1]
-            self.norm2 = build_norm_layer(norm_cfg, dim)[1]
-        else:
-            self.norm1 = nn.BatchNorm2d(dim)
-            self.norm2 = nn.BatchNorm2d(dim)
+
+        self.norm1 = nn.BatchNorm2d(dim)
+        self.norm2 = nn.BatchNorm2d(dim)
         self.attn = Attention(dim, k1, k2)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         mlp_hidden_dim = int(dim * mlp_ratio)

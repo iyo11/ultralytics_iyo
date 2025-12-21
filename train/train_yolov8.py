@@ -1,19 +1,10 @@
 import warnings
+warnings.simplefilter("ignore")          # 比 filterwarnings("ignore") 更“总开关”
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings(
     "ignore",
     category=DeprecationWarning,
-    module="torch"
-)
-warnings.filterwarnings(
-    "ignore",
-    category=FutureWarning,
-    module="timm"
-)
-
-warnings.filterwarnings(
-    "ignore",
-    category=DeprecationWarning,
-    module="mmengine"
+    message=".*TorchScript.*functional optimizers.*"
 )
 
 from ultralytics import YOLO
