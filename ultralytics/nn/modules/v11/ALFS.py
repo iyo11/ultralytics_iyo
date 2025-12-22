@@ -102,84 +102,130 @@ class local_att(nn.Module):
 
 
 class EFC(nn.Module):
-    def __init__(self, c1, c2):
+    """
+    Lightweight EFC:
+    - same call signature: EFC_Lite(c1, c2)
+    - same forward input: [x1, x2]
+    - output: N, c2, H, W
+
+    Key slimming:
+    - Use bottleneck channels c_mid = c2 // r
+    - Replace many c2->c2 1x1 convs with mid-channel ops
+    - Gate generator uses SE-like sigmoid gate instead of full-channel softmax
+    - Fix interact conv overwrite bug (ModuleList)
+    """
+    def __init__(self, c1, c2, r=4, group_num=16, eps=1e-10):
         super().__init__()
-        self.conv1 = nn.Conv2d(c1, c2, kernel_size=1, stride=1)
-        self.conv2 = nn.Conv2d(c2, c2, kernel_size=1, stride=1)
-        self.conv4 = nn.Conv2d(c2, c2, kernel_size=1, stride=1)
+        assert c2 % 4 == 0, "EFC_Lite requires c2 divisible by 4 due to chunk(4)."
+        self.c1, self.c2 = c1, c2
+        self.eps = eps
+        self.group_num = min(group_num, c2)  # avoid weird large grouping
+        c_mid = max(c2 // r, 16)  # keep a sane minimum
+
+        # Unify channels: keep conv1 cheap when possible
+        self.conv1 = nn.Identity() if c1 == c2 else nn.Conv2d(c1, c2, 1, 1, bias=False)
+
+        # Instead of conv2/conv3/conv4 all being c2->c2 heavy, do bottleneck
+        self.reduce = nn.Conv2d(c2, c_mid, 1, 1, bias=False)
+        self.expand = nn.Conv2d(c_mid, c2, 1, 1, bias=False)
+
         self.bn = nn.BatchNorm2d(c2)
-        self.sigomid = nn.Sigmoid()
-        self.group_num = 16
-        self.eps = 1e-10
+        self.sigmoid = nn.Sigmoid()
+
+        # Global mask conv: c2 -> 1 (cheap)
+        self.conv_global = nn.Conv2d(c2, 1, 1, 1, bias=True)
+
+        # Group interaction on chunks: do it in mid-channels to be cheap
+        # chunk into 4 groups along channel (each size c2/4), then reduce each to mid_g
+        mid_g = max((c2 // 4) // r, 8)
+        self.reduce_g = nn.ModuleList([nn.Conv2d(c2 // 4, mid_g, 1, 1, bias=False) for _ in range(4)])
+        self.interact_g = nn.ModuleList([nn.Conv2d(mid_g, mid_g, 1, 1, bias=False) for _ in range(4)])
+        self.expand_g = nn.ModuleList([nn.Conv2d(mid_g, c2 // 4, 1, 1, bias=False) for _ in range(4)])
+
+        # Depthwise conv in mid channels (cheaper)
+        self.dw = nn.Conv2d(c_mid, c_mid, 3, 1, 1, groups=c_mid, bias=False)
+
+        # SE-like gate (very cheap vs Softmax over c2)
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c2, c_mid, 1, 1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c_mid, c2, 1, 1, bias=True),
+            nn.Sigmoid(),
+        )
+
+        # Learnable affine (keep as original spirit)
         self.gamma = nn.Parameter(torch.randn(c2, 1, 1))
         self.beta = nn.Parameter(torch.zeros(c2, 1, 1))
-        self.gate_genator = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Conv2d(c2, c2, 1, 1),
-            nn.ReLU(True),
-            nn.Softmax(dim=1),
-        )
-        self.dwconv = nn.Conv2d(c2, c2, kernel_size=3, stride=1, padding=1, groups=c2)
-        self.conv3 = nn.Conv2d(c2, c2, kernel_size=1, stride=1)
-        self.Apt = nn.AdaptiveAvgPool2d(1)
-        self.one = c2
-        self.two = c2
-        self.conv4_gobal = nn.Conv2d(c2, 1, kernel_size=1, stride=1)
-        for group_id in range(0, 4):
-            self.interact = nn.Conv2d(c2 // 4, c2 // 4, 1, 1, )
+
+        self.apt = nn.AdaptiveAvgPool2d(1)
 
     def forward(self, x):
         x1, x2 = x
-        global_conv1 = self.conv1(x1)
-        bn_x = self.bn(global_conv1)
-        weight_1 = self.sigomid(bn_x)
-        global_conv2 = self.conv2(x2)
-        bn_x2 = self.bn(global_conv2)
-        weight_2 = self.sigomid(bn_x2)
-        X_GOBAL = global_conv1 + global_conv2
-        x_conv4 = self.conv4_gobal(X_GOBAL)
-        X_4_sigmoid = self.sigomid(x_conv4)
-        X_ = X_4_sigmoid * X_GOBAL
-        X_ = X_.chunk(4, dim=1)
-        out = []
-        for group_id in range(0, 4):
-            out_1 = self.interact(X_[group_id])
-            N, C, H, W = out_1.size()
-            x_1_map = out_1.reshape(N, 1, -1)
-            mean_1 = x_1_map.mean(dim=2, keepdim=True)
-            x_1_av = x_1_map / mean_1
-            x_2_2 = F.softmax(x_1_av, dim=1)
-            x1 = x_2_2.reshape(N, C, H, W)
-            x1 = X_[group_id] * x1
-            out.append(x1)
-        out = torch.cat([out[0], out[1], out[2], out[3]], dim=1)
-        N, C, H, W = out.size()
-        x_add_1 = out.reshape(N, self.group_num, -1)
-        N, C, H, W = X_GOBAL.size()
-        x_shape_1 = X_GOBAL.reshape(N, self.group_num, -1)
-        mean_1 = x_shape_1.mean(dim=2, keepdim=True)
-        std_1 = x_shape_1.std(dim=2, keepdim=True)
-        x_guiyi = (x_add_1 - mean_1) / (std_1 + self.eps)
-        x_guiyi_1 = x_guiyi.reshape(N, C, H, W)
-        x_gui = (x_guiyi_1 * self.gamma + self.beta)
+        # align channels
+        a = self.conv1(x1)            # N,c2,H,W
+        b = x2                        # expect N,c2,H,W
 
-        weight_x3 = self.Apt(X_GOBAL)
-        reweights = self.sigomid(weight_x3)
-        x_up_1 = reweights >= weight_1
-        x_low_1 = reweights < weight_1
-        x_up_2 = reweights >= weight_2
-        x_low_2 = reweights < weight_2
-        x_up = x_up_1 * X_GOBAL + x_up_2 * X_GOBAL
-        x_low = x_low_1 * X_GOBAL + x_low_2 * X_GOBAL
-        x11_up_dwc = self.dwconv(x_low)
-        x11_up_dwc = self.conv3(x11_up_dwc)
-        x_so = self.gate_genator(x_low)
-        x11_up_dwc = x11_up_dwc * x_so
-        x22_low_pw = self.conv4(x_up)
-        xL = x11_up_dwc + x22_low_pw
-        xL = xL + x_gui
-        return xL
+        # two branch weights (cheap)
+        w1 = self.sigmoid(self.bn(a))
+        w2 = self.sigmoid(self.bn(b))
 
+        X = a + b                     # fused
+
+        # global spatial mask
+        m = self.sigmoid(self.conv_global(X))   # N,1,H,W
+        X_m = m * X
+
+        # groupwise interaction (cheap bottleneck per group)
+        chunks = X_m.chunk(4, dim=1)
+        out_chunks = []
+        for i in range(4):
+            z = self.reduce_g[i](chunks[i])
+            z = self.interact_g[i](z)
+
+            # keep your "softmax-ish" reweighting idea but on mid_g (not full c2/4)
+            N, Cg, H, W = z.shape
+            z_map = z.reshape(N, 1, -1)
+            mean = z_map.mean(dim=2, keepdim=True).clamp_min(self.eps)
+            z_norm = z_map / mean
+            att = F.softmax(z_norm, dim=1).reshape(N, Cg, H, W)
+
+            z = z * att
+            z = self.expand_g[i](z)
+            out_chunks.append(chunks[i] * z.sigmoid())  # bounded modulation
+
+        out = torch.cat(out_chunks, dim=1)  # N,c2,H,W
+
+        # "group norm-like" normalize (keep spirit, but safe)
+        N, C, H, W = out.shape
+        g = min(self.group_num, C)
+        if C % g != 0:
+            g = 1  # fallback
+        out_g = out.reshape(N, g, -1)
+        X_g = X.reshape(N, g, -1)
+        mean = X_g.mean(dim=2, keepdim=True)
+        std = X_g.std(dim=2, keepdim=True).clamp_min(self.eps)
+        x_gui = ((out_g - mean) / std).reshape(N, C, H, W)
+        x_gui = x_gui * self.gamma + self.beta
+
+        # split into up/low regions as original idea, but process in bottleneck space
+        reweights = self.sigmoid(self.apt(X))
+        x_up = ((reweights >= w1) | (reweights >= w2)).float() * X
+        x_low = ((reweights <  w1) & (reweights <  w2)).float() * X
+
+        # low branch: bottleneck + dw conv
+        low_mid = self.reduce(x_low)
+        low_mid = self.dw(low_mid)
+        low = self.expand(low_mid)
+
+        # up branch: just 1x1 bottleneck (cheap)
+        up = self.expand(self.reduce(x_up))
+
+        # gate on low branch (cheap)
+        low = low * self.gate(x_low)
+
+        y = low + up + x_gui
+        return y
 
 # 二次创新模块 MSEF 可以直接拿去发小论文，冲sci 一区或二区
 '''

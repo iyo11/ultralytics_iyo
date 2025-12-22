@@ -262,7 +262,7 @@ class LMAB(nn.Module):
         num_heads=8,
         kernel_sizes=(3, 5, 7),
         ma_dilations=(1, 2, 2),
-        sma_dilations=(1, 2, 3),
+        sma_dilations=(1, 2, 3),  # (1,2,2)   (1,2,3) √
         mlp_ratio=2.0,
         dw_sizes=(1, 3, 5, 7),
         qkv_bias=True,
