@@ -2,10 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ["LMAB", "LLMAB"]
 
 # -------------------------
-# DropPath (简易版)
+# DropPath
 # -------------------------
 class DropPath(nn.Module):
     def __init__(self, drop_prob=0.0):
@@ -21,15 +20,10 @@ class DropPath(nn.Module):
         mask = torch.floor(rnd)
         return x / keep_prob * mask
 
-
 # -------------------------
 # LayerNorm2d for NCHW
 # -------------------------
 class LayerNorm2d(nn.Module):
-    """
-    True LayerNorm over channel dimension for NCHW tensors.
-    It permutes NCHW -> NHWC, applies layer_norm over C, then permutes back.
-    """
     def __init__(self, num_channels: int, eps: float = 1e-6, affine: bool = True):
         super().__init__()
         self.eps = eps
@@ -52,7 +46,6 @@ class LayerNorm2d(nn.Module):
         )
         return x.permute(0, 3, 1, 2)
 
-
 # -------------------------
 # MSDWConv (NCHW)
 # -------------------------
@@ -72,7 +65,6 @@ class MSDWConv(nn.Module):
         xs = torch.split(x, self.channels, dim=1)
         ys = [conv(t) for conv, t in zip(self.proj, xs)]
         return torch.cat(ys, dim=1)
-
 
 # -------------------------
 # MSConvStar (NCHW)
@@ -95,9 +87,8 @@ class MSConvStar(nn.Module):
         x = self.act(x1) * x2
         return self.fc2(x)
 
-
 # -------------------------
-# Local Multi-Range Attention (Pure PyTorch) + Relative Positional Bias B ✅
+# Local Multi-Range Attentio
 # -------------------------
 class LocalMultiRangeAttention(nn.Module):
     """
@@ -232,11 +223,8 @@ class LocalMultiRangeAttention(nn.Module):
         out = self.proj_drop(self.proj(out))
         return out
 
-
 # -------------------------
-# Cascaded Sparse Context Conv (DWConv cascade + dilation) ✅
-#   - 用串联（cascade）吃多尺度上下文
-#   - 避免并联多空洞带来的 aliasing
+# Cascaded Sparse Context Conv (DWConv cascade + dilation)
 # -------------------------
 class CascadedSparseContextConv(nn.Module):
     def __init__(self, dim, kernel_size=5, dilations=(1, 2, 3)):
@@ -267,78 +255,20 @@ class CascadedSparseContextConv(nn.Module):
         return self.pw(self.dw(x))
 
 
-# -------------------------
-# LMAB：LN2d + (MA + MLP + SMA(cascade) + MLP)
-# class LMAB(nn.Module):
-#     def __init__(
-#         self,
-#         dim,
-#         num_heads=8,
-#         kernel_sizes=(5, 7, 9),
-#         ma_dilations=(1, 2, 3),        # ✅ 检测友好：等效大视野
-#         sma_dilations=(1, 2, 3),       # ✅ 多 dilation 用串联吃回来
-#         mlp_ratio=2.0,
-#         dw_sizes=(1, 3, 5, 7),
-#         qkv_bias=True,
-#         attn_drop=0.0,
-#         proj_drop=0.0,
-#         drop_path=0.0,
-#         sma_conv_kernel=5,
-#         use_rel_pos_bias=True,          # ✅ 新增：是否启用 MA 中的相对位置偏置 B
-#     ):
-#         super().__init__()
-#         self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
-#
-#         self.norm1 = LayerNorm2d(dim)
-#         self.ma = LocalMultiRangeAttention(
-#             dim=dim,
-#             num_heads=num_heads,
-#             kernel_sizes=kernel_sizes,
-#             dilations=ma_dilations,
-#             qkv_bias=qkv_bias,
-#             attn_drop=attn_drop,
-#             proj_drop=proj_drop,
-#             use_rel_pos_bias=use_rel_pos_bias,  # ✅ 传入
-#         )
-#
-#         self.norm2 = LayerNorm2d(dim)
-#         self.mlp1 = MSConvStar(dim=dim, mlp_ratio=mlp_ratio, dw_sizes=dw_sizes)
-#
-#         self.norm3 = LayerNorm2d(dim)
-#         self.sma = CascadedSparseContextConv(
-#             dim=dim,
-#             kernel_size=sma_conv_kernel,
-#             dilations=sma_dilations,
-#         )
-#
-#         self.norm4 = LayerNorm2d(dim)
-#         self.mlp2 = MSConvStar(dim=dim, mlp_ratio=mlp_ratio, dw_sizes=dw_sizes)
-#
-#     def forward(self, x):
-#         x = x + self.drop_path(self.ma(self.norm1(x)))
-#         x = x + self.drop_path(self.mlp1(self.norm2(x)))
-#         x = x + self.drop_path(self.sma(self.norm3(x)))
-#         x = x + self.drop_path(self.mlp2(self.norm4(x)))
-#         return x
-# -------------------------
 class LMAB(nn.Module):
-    """
-    Large-target MAB: 大视野/强语义聚合
-    推荐放：P4/P5 (stride 16/32)
-    """
     def __init__(
         self,
         dim,
         num_heads=8,
         kernel_sizes=(3, 5, 7),
         ma_dilations=(1, 2, 2),
-        sma_dilations=(1, 2, 2),
+        sma_dilations=(1, 2, 3),
         mlp_ratio=2.0,
         dw_sizes=(1, 3, 5, 7),
         qkv_bias=True,
+        drop_path=0.0,
         attn_drop=0.0,
         proj_drop=0.0,
-        drop_path=0.0,
         sma_conv_kernel=3,
         use_rel_pos_bias=False,
     ):
@@ -387,11 +317,11 @@ class LMMAB(nn.Module):
         self,
         dim,
         num_heads=8,
-        kernel_sizes=(3, 5),          # 中目标更稳：默认不带 7
-        ma_dilations=(1, 2),       # 温和扩视野
+        kernel_sizes=(3, 5),
+        ma_dilations=(1, 2),
         sma_dilations=(1, 2),
         mlp_ratio=1.5,
-        dw_sizes=(1, 3, 5),           # 中层建议去掉 7，减少“糊”
+        dw_sizes=(1, 3, 5),
         qkv_bias=True,
         attn_drop=0.0,
         proj_drop=0.0,
@@ -444,11 +374,11 @@ class LTMAB(nn.Module):
         self,
         dim,
         num_heads=8,
-        kernel_sizes=(3, 5),          # 小目标默认不带 7
-        ma_dilations=(1, 1),       # 小目标更保守：更密更稳（如需更大视野可改 (1,1,2)）
+        kernel_sizes=(3, 5),
+        ma_dilations=(1, 1),
         sma_dilations=(1, 1),
         mlp_ratio=1.25,
-        dw_sizes=(1, 3),              # 小目标更保细节；如想更强可改 (1,3,5)
+        dw_sizes=(1, 3),
         qkv_bias=True,
         attn_drop=0.0,
         proj_drop=0.0,
@@ -489,79 +419,4 @@ class LTMAB(nn.Module):
         x = x + self.drop_path(self.mlp1(self.norm2(x)))
         x = x + self.drop_path(self.sma(self.norm3(x)))
         x = x + self.drop_path(self.mlp2(self.norm4(x)))
-        return x
-
-# -------------------------
-# LLMAB：LN2d + LayerScale（检测更稳）
-# -------------------------
-class LLMAB(nn.Module):
-    def __init__(
-        self,
-        dim,
-        num_heads=8,
-        kernel_sizes=(5, 7, 9),
-        ma_dilations=(1, 2, 3),       # ✅ 检测友好：等效大视野
-        sma_dilations=(1, 2, 3),      # ✅ 多 dilation 串联
-        mlp_ratio=2.0,
-        dw_sizes=(1, 3, 5, 7),
-        qkv_bias=True,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        drop_path=0.0,
-        sma_conv_kernel=5,
-        layer_scale_init=1e-3,      # attention block 用 1e-3 通常更稳
-        use_full_layerscale=False,   # 默认四支路都门控（推荐）
-        use_rel_pos_bias=True,      # ✅ 新增：是否启用 MA 中的相对位置偏置 B
-    ):
-        super().__init__()
-        self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
-
-        self.norm1 = LayerNorm2d(dim)
-        self.ma = LocalMultiRangeAttention(
-            dim=dim,
-            num_heads=num_heads,
-            kernel_sizes=kernel_sizes,
-            dilations=ma_dilations,
-            qkv_bias=qkv_bias,
-            attn_drop=attn_drop,
-            proj_drop=proj_drop,
-            use_rel_pos_bias=use_rel_pos_bias,  # ✅ 传入
-        )
-
-        self.norm2 = LayerNorm2d(dim)
-        self.mlp1 = MSConvStar(dim=dim, mlp_ratio=mlp_ratio, dw_sizes=dw_sizes)
-
-        self.norm3 = LayerNorm2d(dim)
-        self.sma = CascadedSparseContextConv(
-            dim=dim,
-            kernel_size=sma_conv_kernel,
-            dilations=sma_dilations,
-        )
-
-        self.norm4 = LayerNorm2d(dim)
-        self.mlp2 = MSConvStar(dim=dim, mlp_ratio=mlp_ratio, dw_sizes=dw_sizes)
-
-        init = float(layer_scale_init)
-        self.use_full_layerscale = use_full_layerscale
-
-        if use_full_layerscale:
-            self.gamma_ma   = nn.Parameter(init * torch.ones(1, dim, 1, 1))
-            self.gamma_mlp1 = nn.Parameter(init * torch.ones(1, dim, 1, 1))
-        else:
-            self.register_parameter("gamma_ma", None)
-            self.register_parameter("gamma_mlp1", None)
-
-        self.gamma_sma  = nn.Parameter(init * torch.ones(1, dim, 1, 1))
-        self.gamma_mlp2 = nn.Parameter(init * torch.ones(1, dim, 1, 1))
-
-    def forward(self, x):
-        if self.use_full_layerscale:
-            x = x + self.drop_path(self.gamma_ma   * self.ma(self.norm1(x)))
-            x = x + self.drop_path(self.gamma_mlp1 * self.mlp1(self.norm2(x)))
-        else:
-            x = x + self.drop_path(self.ma(self.norm1(x)))
-            x = x + self.drop_path(self.mlp1(self.norm2(x)))
-
-        x = x + self.drop_path(self.gamma_sma  * self.sma(self.norm3(x)))
-        x = x + self.drop_path(self.gamma_mlp2 * self.mlp2(self.norm4(x)))
         return x

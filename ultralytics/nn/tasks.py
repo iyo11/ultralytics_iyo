@@ -69,13 +69,14 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     v10Detect,
 )
-from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA
+from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
+from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
 from ultralytics.nn.modules.v11.FeatureFusion import FeatureFusion
 from ultralytics.nn.modules.v11.InceptionNeXt import InceptionDWConv2d
 from ultralytics.nn.modules.v11.LitePKIBlock import LitePKIBlock
 from ultralytics.nn.modules.v11.MRFA import MRFAConv, C3k2_MRFAConv
 from ultralytics.nn.modules.v11.MSConvStar import MAB
-from ultralytics.nn.modules.v11.MSConvStarLike import LMAB, LLMAB, LTMAB, LMMAB
+from ultralytics.nn.modules.v11.MSConvStarLike import LMAB, LTMAB, LMMAB
 from ultralytics.nn.modules.v11.PATConv import PATConvC3k2, PATConv
 from ultralytics.nn.modules.v11.PKIBlock import PKIBlock11
 from ultralytics.nn.modules.v11.StripConv import StripConvC3k2, DSC3k_StripBlock
@@ -1599,11 +1600,12 @@ def parse_model(d, ch, verbose=True):
             LitePKIBlock,
             MAB,
             LMAB,
-            LLMAB,
             LMMAB,
             LTMAB,
             DSSA,
-            C3k2_DSSA
+            C3k_DSSA,
+            MSEF,
+            EFC
         }
     )
 
@@ -1639,7 +1641,7 @@ def parse_model(d, ch, verbose=True):
             C3k2_CAA,
             MRFAConv,
             C3k2_MRFAConv,
-            C3k2_DSSA
+            C3k_DSSA
         }
     )
 
@@ -1722,6 +1724,10 @@ def parse_model(d, ch, verbose=True):
 
         elif m is AIFI:
             args = [ch[f], *args]
+
+        elif m in {EFC, MSEF}:
+            c2 = ch[f[1]]
+            args = [ch[f[0]], c2]
 
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]
