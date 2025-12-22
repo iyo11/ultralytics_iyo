@@ -1693,8 +1693,15 @@ def parse_model(d, ch, verbose=True):
                 # It expects (dim, ...) not (c1, c2, ...)
 
             elif m in {EFC, MSEF}:
-             c2 = ch[f[1]]
-             args = [ch[f[0]], c2]
+                # EFC/MSEF: two-input modules
+                if not isinstance(f, (list, tuple)) or len(f) != 2:
+                    raise TypeError(f"{m.__name__} expects f=[from1, from2], got f={f} at layer {i}")
+
+                c1 = ch[f[0]]
+                c2 = ch[f[1]]  # 输出通道固定等于第二路特征的通道（你的实现就是这么设计的）
+                args = [c1, c2]  # 直接覆盖 YAML args（强烈建议）
+                # 不要再对 c2 做 make_divisible(width) 缩放，否则会和“第二路特征通道”对不齐
+
 
             # ---------------- All other base modules ----------------
             else:
