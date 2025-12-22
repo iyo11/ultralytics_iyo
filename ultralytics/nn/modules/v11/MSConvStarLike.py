@@ -322,21 +322,25 @@ class CascadedSparseContextConv(nn.Module):
 #         return x
 # -------------------------
 class LMAB(nn.Module):
+    """
+    Large-target MAB: 大视野/强语义聚合
+    推荐放：P4/P5 (stride 16/32)
+    """
     def __init__(
         self,
         dim,
         num_heads=8,
         kernel_sizes=(3, 5, 7),
-        ma_dilations=(1, 2, 2),        # ✅ 检测友好：等效大视野
-        sma_dilations=(1, 2, 2),       # ✅ 多 dilation 用串联吃回来
-        mlp_ratio=1.25,
-        dw_sizes=(1, 3, 5),
+        ma_dilations=(1, 2, 2),
+        sma_dilations=(1, 2, 2),
+        mlp_ratio=2.0,
+        dw_sizes=(1, 3, 5, 7),
         qkv_bias=True,
         attn_drop=0.0,
         proj_drop=0.0,
         drop_path=0.0,
         sma_conv_kernel=3,
-        use_rel_pos_bias=False,          # ✅ 新增：是否启用 MA 中的相对位置偏置 B
+        use_rel_pos_bias=False,
     ):
         super().__init__()
         self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
@@ -350,7 +354,7 @@ class LMAB(nn.Module):
             qkv_bias=qkv_bias,
             attn_drop=attn_drop,
             proj_drop=proj_drop,
-            use_rel_pos_bias=use_rel_pos_bias,  # ✅ 传入
+            use_rel_pos_bias=use_rel_pos_bias,
         )
 
         self.norm2 = LayerNorm2d(dim)
@@ -373,6 +377,119 @@ class LMAB(nn.Module):
         x = x + self.drop_path(self.mlp2(self.norm4(x)))
         return x
 
+
+class LMMAB(nn.Module):
+    """
+    Medium-target MAB: 稳结构 + 适度上下文
+    推荐放：P3/P4 (stride 8/16)
+    """
+    def __init__(
+        self,
+        dim,
+        num_heads=8,
+        kernel_sizes=(3, 5),          # 中目标更稳：默认不带 7
+        ma_dilations=(1, 2),       # 温和扩视野
+        sma_dilations=(1, 2),
+        mlp_ratio=1.5,
+        dw_sizes=(1, 3, 5),           # 中层建议去掉 7，减少“糊”
+        qkv_bias=True,
+        attn_drop=0.0,
+        proj_drop=0.0,
+        drop_path=0.0,
+        sma_conv_kernel=3,
+        use_rel_pos_bias=False,
+    ):
+        super().__init__()
+        self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
+
+        self.norm1 = LayerNorm2d(dim)
+        self.ma = LocalMultiRangeAttention(
+            dim=dim,
+            num_heads=num_heads,
+            kernel_sizes=kernel_sizes,
+            dilations=ma_dilations,
+            qkv_bias=qkv_bias,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
+            use_rel_pos_bias=use_rel_pos_bias,
+        )
+
+        self.norm2 = LayerNorm2d(dim)
+        self.mlp1 = MSConvStar(dim=dim, mlp_ratio=mlp_ratio, dw_sizes=dw_sizes)
+
+        self.norm3 = LayerNorm2d(dim)
+        self.sma = CascadedSparseContextConv(
+            dim=dim,
+            kernel_size=sma_conv_kernel,
+            dilations=sma_dilations,
+        )
+
+        self.norm4 = LayerNorm2d(dim)
+        self.mlp2 = MSConvStar(dim=dim, mlp_ratio=mlp_ratio, dw_sizes=dw_sizes)
+
+    def forward(self, x):
+        x = x + self.drop_path(self.ma(self.norm1(x)))
+        x = x + self.drop_path(self.mlp1(self.norm2(x)))
+        x = x + self.drop_path(self.sma(self.norm3(x)))
+        x = x + self.drop_path(self.mlp2(self.norm4(x)))
+        return x
+
+
+class LTMAB(nn.Module):
+    """
+    Tiny-target MAB: 保细节/密采样/少平滑
+    推荐放：P2/P3 (stride 4/8)，优先 P2
+    """
+    def __init__(
+        self,
+        dim,
+        num_heads=8,
+        kernel_sizes=(3, 5),          # 小目标默认不带 7
+        ma_dilations=(1, 1),       # 小目标更保守：更密更稳（如需更大视野可改 (1,1,2)）
+        sma_dilations=(1, 1),
+        mlp_ratio=1.25,
+        dw_sizes=(1, 3),              # 小目标更保细节；如想更强可改 (1,3,5)
+        qkv_bias=True,
+        attn_drop=0.0,
+        proj_drop=0.0,
+        drop_path=0.0,
+        sma_conv_kernel=3,
+        use_rel_pos_bias=False,
+    ):
+        super().__init__()
+        self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
+
+        self.norm1 = LayerNorm2d(dim)
+        self.ma = LocalMultiRangeAttention(
+            dim=dim,
+            num_heads=num_heads,
+            kernel_sizes=kernel_sizes,
+            dilations=ma_dilations,
+            qkv_bias=qkv_bias,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
+            use_rel_pos_bias=use_rel_pos_bias,
+        )
+
+        self.norm2 = LayerNorm2d(dim)
+        self.mlp1 = MSConvStar(dim=dim, mlp_ratio=mlp_ratio, dw_sizes=dw_sizes)
+
+        self.norm3 = LayerNorm2d(dim)
+        self.sma = CascadedSparseContextConv(
+            dim=dim,
+            kernel_size=sma_conv_kernel,
+            dilations=sma_dilations,
+        )
+
+        self.norm4 = LayerNorm2d(dim)
+        self.mlp2 = MSConvStar(dim=dim, mlp_ratio=mlp_ratio, dw_sizes=dw_sizes)
+
+    def forward(self, x):
+        x = x + self.drop_path(self.ma(self.norm1(x)))
+        x = x + self.drop_path(self.mlp1(self.norm2(x)))
+        x = x + self.drop_path(self.sma(self.norm3(x)))
+        x = x + self.drop_path(self.mlp2(self.norm4(x)))
+        return x
 
 # -------------------------
 # LLMAB：LN2d + LayerScale（检测更稳）

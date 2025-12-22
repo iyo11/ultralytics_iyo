@@ -69,12 +69,13 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     v10Detect,
 )
+from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA
 from ultralytics.nn.modules.v11.FeatureFusion import FeatureFusion
 from ultralytics.nn.modules.v11.InceptionNeXt import InceptionDWConv2d
 from ultralytics.nn.modules.v11.LitePKIBlock import LitePKIBlock
 from ultralytics.nn.modules.v11.MRFA import MRFAConv, C3k2_MRFAConv
 from ultralytics.nn.modules.v11.MSConvStar import MAB
-from ultralytics.nn.modules.v11.MSConvStarLike import LMAB, LLMAB
+from ultralytics.nn.modules.v11.MSConvStarLike import LMAB, LLMAB, LTMAB, LMMAB
 from ultralytics.nn.modules.v11.PATConv import PATConvC3k2, PATConv
 from ultralytics.nn.modules.v11.PKIBlock import PKIBlock11
 from ultralytics.nn.modules.v11.StripConv import StripConvC3k2, DSC3k_StripBlock
@@ -1599,6 +1600,10 @@ def parse_model(d, ch, verbose=True):
             MAB,
             LMAB,
             LLMAB,
+            LMMAB,
+            LTMAB,
+            DSSA,
+            C3k2_DSSA
         }
     )
 
@@ -1634,6 +1639,7 @@ def parse_model(d, ch, verbose=True):
             C3k2_CAA,
             MRFAConv,
             C3k2_MRFAConv,
+            C3k2_DSSA
         }
     )
 
