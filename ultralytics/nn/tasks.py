@@ -1692,6 +1692,10 @@ def parse_model(d, ch, verbose=True):
                 # IMPORTANT: do NOT transform args to [c1, c2, ...] for FeatureFusion.
                 # It expects (dim, ...) not (c1, c2, ...)
 
+            elif m in {EFC, MSEF}:
+             c2 = ch[f[1]]
+             args = [ch[f[0]], c2]
+
             # ---------------- All other base modules ----------------
             else:
                 c1, c2 = ch[f], args[0]
@@ -1724,10 +1728,6 @@ def parse_model(d, ch, verbose=True):
 
         elif m is AIFI:
             args = [ch[f], *args]
-
-        elif m in {EFC, MSEF}:
-            c2 = ch[f[1]]
-            args = [ch[f[0]], c2]
 
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]
