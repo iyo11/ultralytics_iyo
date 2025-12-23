@@ -79,6 +79,7 @@ from ultralytics.nn.modules.v11.MSConvStar import MAB
 from ultralytics.nn.modules.v11.MSConvStarLike import LMAB, LTMAB, LMMAB
 from ultralytics.nn.modules.v11.MSConvStarLikeLight import UMABL
 from ultralytics.nn.modules.v11.MSConvStarLikeSCAM import MABL_SCAM
+from ultralytics.nn.modules.v11.MSConvStarLikeSCAM2 import MABL_SCAM2
 from ultralytics.nn.modules.v11.PATConv import PATConvC3k2, PATConv
 from ultralytics.nn.modules.v11.PKIBlock import PKIBlock11
 from ultralytics.nn.modules.v11.StripConv import StripConvC3k2, DSC3k_StripBlock
@@ -1609,7 +1610,8 @@ def parse_model(d, ch, verbose=True):
             MSEF,
             EFC,
             UMABL,
-            MABL_SCAM
+            MABL_SCAM,
+            MABL_SCAM2,
         }
     )
 

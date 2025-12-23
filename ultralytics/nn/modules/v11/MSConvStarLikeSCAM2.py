@@ -62,6 +62,7 @@ class MSDWConv(nn.Module):
             ch = dim - (dim // n) * (n - 1) if i == 0 else (dim // n)
             self.channels.append(ch)
             self.proj.append(nn.Conv2d(ch, ch, k, padding=k // 2, groups=ch, bias=True))
+
     def forward(self, x):
         xs = torch.split(x, self.channels, dim=1)
         ys = [conv(t) for conv, t in zip(self.proj, xs)]
@@ -79,21 +80,21 @@ class MSConvStar(nn.Module):
             raise ValueError(f"hidden_dim must be even for chunk(2), got {hidden}")
         self.fc1 = nn.Conv2d(dim, hidden, 1)
         self.dw = MSDWConv(hidden, dw_sizes=dw_sizes)
-        # 新增：多尺度输出后的融合 + 非线性
+        # 多尺度输出后的融合 + 非线性
         self.fuse = nn.Conv2d(hidden, hidden, kernel_size=1, bias=True)
         self.fuse_act = nn.GELU()
         self.act = nn.GELU()
         self.fc2 = nn.Conv2d(hidden // 2, dim, 1)
+
     def forward(self, x):
         x = self.fc1(x)
         # 多尺度DWConv残差
         x = x + self.dw(x)
-        # 新增：1x1融合 + GELU（更贴近论文图里的“融合+非线性”位置）
+        # 1x1融合 + GELU（更贴近论文图里的“融合+非线性”位置）
         x = self.fuse_act(self.fuse(x))
         # Star
         x1, x2 = x.chunk(2, dim=1)
         x = self.act(x1) * x2
-
         return self.fc2(x)
 
 
@@ -113,12 +114,13 @@ class CascadedSparseContextConv(nn.Module):
             padding = (kernel_size // 2) * d
             layers.append(
                 nn.Conv2d(
-                    dim, dim,
+                    dim,
+                    dim,
                     kernel_size=kernel_size,
                     padding=padding,
                     dilation=d,
                     groups=dim,
-                    bias=True
+                    bias=True,
                 )
             )
             layers.append(nn.GELU())
@@ -129,114 +131,131 @@ class CascadedSparseContextConv(nn.Module):
         return self.pw(self.dw(x))
 
 
+# -------------------------
+# Minimal Conv wrappers (for "official" SCAM dependencies)
+# -------------------------
+class Conv(nn.Module):
+    """Conv2d + BN + SiLU (common detection style)."""
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):
+        super().__init__()
+        if p is None:
+            p = k // 2
+        self.conv = nn.Conv2d(c1, c2, k, s, p, groups=g, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = nn.SiLU(inplace=True) if act else nn.Identity()
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+
+class Conv_withoutBN(nn.Module):
+    """Conv2d (bias=True) + optional act; no BN."""
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=False):
+        super().__init__()
+        if p is None:
+            p = k // 2
+        self.conv = nn.Conv2d(c1, c2, k, s, p, groups=g, bias=True)
+        self.act = nn.SiLU(inplace=True) if act else nn.Identity()
+
+    def forward(self, x):
+        return self.act(self.conv(x))
+
+
 # ============================================================
-# SCAM (NCHW) — Spatial-Channel Attention Module
-#   - Input/Output: (B,C,H,W)
-#   - Designed to be a drop-in replacement for your previous SA/MA
+# Official SCAM (your provided "authentic" version)
+# ============================================================
+class OfficialSCAM(nn.Module):
+    def __init__(self, in_channels, reduction=1):
+        super(OfficialSCAM, self).__init__()
+        self.in_channels = in_channels
+        self.inter_channels = in_channels  # keep as-is
+
+        self.k = Conv(in_channels, 1, 1, 1)
+        self.v = Conv(in_channels, self.inter_channels, 1, 1)
+        self.m = Conv_withoutBN(self.inter_channels, in_channels, 1, 1)
+        self.m2 = Conv(2, 1, 1, 1)
+
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)  # GAP
+        self.max_pool = nn.AdaptiveMaxPool2d(1)  # GMP
+
+    def forward(self, x):
+        n, c, h, w = x.size(0), x.size(1), x.size(2), x.size(3)
+
+        avg = self.avg_pool(x).softmax(1).view(n, 1, 1, c)
+        max = self.max_pool(x).softmax(1).view(n, 1, 1, c)
+
+        k = self.k(x).view(n, 1, -1, 1).softmax(2)
+        v = self.v(x).view(n, 1, c, -1)
+
+        y = torch.matmul(v, k).view(n, c, 1, 1)
+
+        y_avg = torch.matmul(avg, v).view(n, 1, h, w)
+        y_max = torch.matmul(max, v).view(n, 1, h, w)
+        y_cat = torch.cat((y_avg, y_max), 1)
+
+        y = self.m(y) * self.m2(y_cat).sigmoid()
+
+        return x + y
+
+
+# ============================================================
+# SCAM Adapter (drop-in for MABL_SCAM)
 # ============================================================
 class SCAM(nn.Module):
     """
-    A practical SCAM implementation aligned with the figure's intent:
-      - Spatial branch uses GMP/GAP to produce a spatial gate (B,1,H,W)
-      - Channel branch uses QK/Value (1x1 conv) to produce a channel gate (B,C,1,1)
-      - Gates are applied multiplicatively, then lightly projected
+    Drop-in replacement for the previous SCAM API:
+      - Accepts dim/qk_bias/use_channel/use_spatial but ignores them
+      - Executes OfficialSCAM exactly
     """
-    def __init__(self, dim, qk_bias=True, use_channel=True, use_spatial=True):
+
+    def __init__(self, dim, qk_bias=True, use_channel=True, use_spatial=True, reduction=1, **kwargs):
         super().__init__()
-        self.dim = dim
-        self.use_channel = use_channel
-        self.use_spatial = use_spatial
-
-        # Spatial branch
-        if self.use_spatial:
-            self.spatial_gate = nn.Conv2d(1, 1, kernel_size=1, bias=True)
-            self.spatial_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=True)
-
-        # Channel branch
-        if self.use_channel:
-            self.qk = nn.Conv2d(dim, dim, kernel_size=1, bias=qk_bias)
-            self.val = nn.Conv2d(dim, dim, kernel_size=1, bias=qk_bias)
-            self.channel_proj = nn.Conv2d(dim, dim, kernel_size=1, bias=True)
-
-        # Final fuse
-        self.fuse = nn.Conv2d(dim, dim, kernel_size=1, bias=True)
+        self.core = OfficialSCAM(in_channels=dim, reduction=reduction)
 
     def forward(self, x):
-        out = x
-
-        # ---- Spatial attention: (B,1,H,W) ----
-        if self.use_spatial:
-            # channel-wise pooling
-            a = x.mean(dim=1, keepdim=True)       # GAP -> (B,1,H,W)
-            m = x.amax(dim=1, keepdim=True)       # GMP -> (B,1,H,W)
-
-            # route softmax over {max, avg}
-            s = torch.cat([m, a], dim=1)          # (B,2,H,W)
-            s = F.softmax(s, dim=1)
-            s = s[:, 0:1] * m + s[:, 1:2] * a     # (B,1,H,W)
-
-            s = self.spatial_gate(s)              # (B,1,H,W)
-            s = torch.sigmoid(s)                  # gate stability
-            out = out * s                         # broadcast Hadamard
-            out = self.spatial_proj(out)
-
-        # ---- Channel attention: (B,C,1,1) ----
-        if self.use_channel:
-            qk = self.qk(x)                       # (B,C,H,W)
-            v = self.val(x)                       # (B,C,H,W)
-
-            qk_g = qk.mean(dim=(2, 3))            # (B,C)
-            v_g = v.mean(dim=(2, 3))              # (B,C)
-
-            w = F.softmax(qk_g, dim=1)            # (B,C)
-            c_desc = (w * v_g).unsqueeze(-1).unsqueeze(-1)  # (B,C,1,1)
-
-            c_gate = torch.sigmoid(c_desc)
-            out = out * c_gate
-            out = self.channel_proj(out)
-
-        return self.fuse(out)
+        return self.core(x)
 
 
 # ============================================================
-# UMABL — Unified block (one config everywhere)
-#   - Uses SCAM as the attention module
-#   - Keeps your SMA + MSConvStar MLPs
+# UMABL — Unified block (SCAM + MSConvStar + SMA + MSConvStar)
 # ============================================================
-class MABL_SCAM(nn.Module):
+class MABL_SCAM2(nn.Module):
     """
     One unified block to use at P2/P3/P4 with the same hyperparams by default.
     """
+
     def __init__(
         self,
         dim: int,
         # keep for API compatibility; SCAM doesn't use heads
         num_heads: int = 8,
-
-        # SCAM
+        # SCAM (kept for compatibility; adapter ignores switches)
         qkv_bias: bool = True,
         use_spatial: bool = True,
         use_channel: bool = True,
-
-        # MLP (unified middle values)
+        # MLP
         mlp_ratio: float = 1.5,
         dw_sizes=(1, 3, 5, 7),
-
-        # SMA (unified middle values)
+        # SMA
         sma_conv_kernel: int = 3,
-        sma_dilations=(1, 2),  # (1,2,3) ×  (1,2,2)× 
-
+        sma_dilations=(1, 2),
         # regularization
         drop_path: float = 0.0,
     ):
         super().__init__()
         self.drop_path = DropPath(drop_path) if drop_path > 0 else nn.Identity()
+
         self.norm1 = LayerNorm2d(dim)
         self.ma = SCAM(dim=dim, qk_bias=qkv_bias, use_channel=use_channel, use_spatial=use_spatial)
+
         self.norm2 = LayerNorm2d(dim)
         self.mlp1 = MSConvStar(dim=dim, mlp_ratio=mlp_ratio, dw_sizes=dw_sizes)
+
         self.norm3 = LayerNorm2d(dim)
         self.sma = CascadedSparseContextConv(dim=dim, kernel_size=sma_conv_kernel, dilations=sma_dilations)
+
         self.norm4 = LayerNorm2d(dim)
         self.mlp2 = MSConvStar(dim=dim, mlp_ratio=mlp_ratio, dw_sizes=dw_sizes)
 
@@ -254,6 +273,6 @@ class MABL_SCAM(nn.Module):
 if __name__ == "__main__":
     torch.manual_seed(0)
     x = torch.randn(2, 96, 64, 64)
-    blk = MABL_SCAM(dim=96, drop_path=0.1)
+    blk = MABL_SCAM2(dim=96, drop_path=0.1)
     y = blk(x)
     print("input:", x.shape, "output:", y.shape)
