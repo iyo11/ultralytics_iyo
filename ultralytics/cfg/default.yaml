@@ -131,4 +131,4 @@ tracker: botsort.yaml # (str) tracker config file: botsort.yaml or bytetrack.yam
 
 # nwdloss : False
 gcdloss : False
-iou_ratio : 0.75
+iou_ratio : 0.6
