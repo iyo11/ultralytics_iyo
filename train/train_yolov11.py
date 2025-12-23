@@ -20,12 +20,12 @@ else:
     workers = 10
     cacheTF =  True
 
-epoch_count = 150
-close_mosaic_count = 150
+epoch_count = 200
+close_mosaic_count = 200
 
 if __name__ == '__main__':
     #model = YOLO('yolov8n.yaml')
-    model = YOLO('../models/v11/yolov11n_EFC.yaml')
+    model = YOLO('../models/v11/yolov11n_MABLSCAM.yaml')
     # 如何切换模型版本, 上面的ymal文件可以改为 yolov8s.yaml就是使用的v8s,
     # 类似某个改进的yaml文件名称为yolov8-XXX.yaml那么如果想使用其它版本就把上面的名称改为yolov8l-XXX.yaml即可（改的是上面YOLO中间的名字不是配置文件的）！
     # model.load('yolov8n.pt') # 是否加载预训练权重,科研不建议大家加载否则很难提升精度

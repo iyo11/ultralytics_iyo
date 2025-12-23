@@ -282,10 +282,10 @@ class YOLOv8GradCAM:
 
 def get_params():
     return dict(
-        weight="../../pts/v8n_fusion11_t1_best.pt",
+        weight="../../pts/best.pt",
         device="cuda:0",
         method="XGradCAM",          # 如果仍然偏弱，可试 XGradCAM / EigenCAM
-        layer="model.model[15]",   # 你之前 debug 的 PCMFAM 是 19（日志里显示 19: PCMFAM）
+        layer="model.model[23]",   # 你之前 debug 的 PCMFAM 是 19（日志里显示 19: PCMFAM）
         backward_type="all",       # class / box / all
         conf_threshold=0.6,
         ratio=0.05,
@@ -298,7 +298,7 @@ if __name__ == "__main__":
     params = get_params()
     cam = YOLOv8GradCAM(**params)
 
-    img_path = "E:/datas/vehicle/images/val2017/20080816144810-01005438_7_4.jpg"
+    img_path = "E:/datas/NWPU_VHR/images/2.jpg"
 
     # 可选：先看输出特征图 shape
     cam.debug_layer_output_shape(img_path)
