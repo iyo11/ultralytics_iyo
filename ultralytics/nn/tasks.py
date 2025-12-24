@@ -82,7 +82,7 @@ from ultralytics.nn.modules.v11.MSConvStarLikeSCAM import MABL_SCAM
 from ultralytics.nn.modules.v11.MSConvStarLikeSCAM2 import MABL_SCAM2
 from ultralytics.nn.modules.v11.PATConv import PATConvC3k2, PATConv
 from ultralytics.nn.modules.v11.PKIBlock import PKIBlock11
-from ultralytics.nn.modules.v11.StarOperation import StarC3k2
+from ultralytics.nn.modules.v11.StarOperation import StarC3k2, StarC2f
 from ultralytics.nn.modules.v11.StripConv import StripConvC3k2, DSC3k_StripBlock
 from ultralytics.nn.modules.v11.StripConvHead import Detect_StripConvHead
 from ultralytics.nn.modules.v8.C_Fasters import C3_Faster, C2f_Faster, C3_Faster_GELUv2, C2f_Faster_GELUv2
@@ -1613,7 +1613,8 @@ def parse_model(d, ch, verbose=True):
             UMABL,
             MABL_SCAM,
             MABL_SCAM2,
-            StarC3k2
+            StarC3k2,
+            StarC2f
         }
     )
 
@@ -1650,7 +1651,8 @@ def parse_model(d, ch, verbose=True):
             MRFAConv,
             C3k2_MRFAConv,
             C3k_DSSA,
-            StarC3k2
+            StarC3k2,
+            StarC2f
         }
     )
 

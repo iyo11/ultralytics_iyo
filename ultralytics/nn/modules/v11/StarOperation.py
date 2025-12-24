@@ -1,12 +1,13 @@
 import torch
 import torch.nn as nn
-from ultralytics.nn.modules import C2f
+from ultralytics.nn.modules import C2f, Conv
 
 
 # 你工程里已有
 # from ultralytics.nn.modules.block import C2f, Bottleneck, C3k
 # from ultralytics.nn.modules.conv import Conv
 
+__all__ = ['StarOperation', 'StarBottleneck', 'StarC3k2', 'StarC2f']
 
 class StarOperation(nn.Module):
     """Conv1 -> Conv2; x * gate; Conv3"""
@@ -61,3 +62,18 @@ class StarC3k2(C2f):
             StarBottleneck(self.c, shortcut=shortcut, e=1.0, Conv=Conv)
             for _ in range(n)
         )
+
+class StarC2f(C2f):
+    """
+    继承 C2f，只替换 self.m 中的 block 为 StarBottleneck
+    签名与原 C2f 对齐： (c1, c2, n=1, shortcut=False, g=1, e=0.5)
+    """
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+
+        # self.c 是 C2f 内部的分支通道数（C2f 已经算好）
+        self.m = nn.ModuleList(
+            StarBottleneck(self.c, shortcut=shortcut, e=1.0, Conv=Conv)
+            for _ in range(n)
+        )
+
