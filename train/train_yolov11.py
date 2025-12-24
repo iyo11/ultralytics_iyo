@@ -25,7 +25,7 @@ close_mosaic_count = 200
 
 if __name__ == '__main__':
     #model = YOLO('yolov8n.yaml')
-    model = YOLO('../models/v12/yolov12n_MABLSCAM.yaml')
+    model = YOLO('../models/v8/yolov8n_MABLSCAM.yaml')
     # 如何切换模型版本, 上面的ymal文件可以改为 yolov8s.yaml就是使用的v8s,
     # 类似某个改进的yaml文件名称为yolov8-XXX.yaml那么如果想使用其它版本就把上面的名称改为yolov8l-XXX.yaml即可（改的是上面YOLO中间的名字不是配置文件的）！
     # model.load('yolov8n.pt') # 是否加载预训练权重,科研不建议大家加载否则很难提升精度
@@ -40,7 +40,7 @@ if __name__ == '__main__':
                 mixup=0.0,
                 workers=workers,
                 device='0',
-                optimizer='SGD', # using SGD
+                optimizer='auto', # using SGD
                 #resume='C:\\Users\\IYO\\Desktop\\Strip\\ultralytics-main\\runs\\train\\exp4', # 续训设置last.pt的地址
                 resume=False,
                 amp=True,  # 如果出现训练损失为Nan可以关闭amp
