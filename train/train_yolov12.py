@@ -21,7 +21,7 @@ else:
     cacheTF =  True
 
 epoch_count = 200
-close_mosaic_count = 200
+close_mosaic_count = 10
 
 if __name__ == '__main__':
     #model = YOLO('yolov8n.yaml')
@@ -36,11 +36,11 @@ if __name__ == '__main__':
                 single_cls=False,  # 是否是单类别检测
                 batch=batch_size,
                 close_mosaic=close_mosaic_count,
-                mosaic=0.0,
+                mosaic=1.0,
                 mixup=0.0,
                 workers=workers,
                 device='0',
-                optimizer='SGD', # using SGD
+                optimizer='auto', # using SGD
                 #resume='C:\\Users\\IYO\\Desktop\\Strip\\ultralytics-main\\runs\\train\\exp4', # 续训设置last.pt的地址
                 resume=False,
                 amp=True,  # 如果出现训练损失为Nan可以关闭amp

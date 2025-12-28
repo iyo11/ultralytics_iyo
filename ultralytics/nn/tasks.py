@@ -69,10 +69,14 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     v10Detect,
 )
+from ultralytics.nn.modules.backbone.PoolFormer import PoolFormerBlock
+from ultralytics.nn.modules.backbone.PoolFormerMSConvV2 import PoolFormerMSConvBlockV2
+from ultralytics.nn.modules.backbone.PoolFormerMsConv import PoolFormerMSConvBlock
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
 from ultralytics.nn.modules.v11.FeatureFusion import FeatureFusion
 from ultralytics.nn.modules.v11.InceptionNeXt import InceptionDWConv2d
+from ultralytics.nn.modules.v11.LGFB import C3k2_LGFB, LGFB
 from ultralytics.nn.modules.v11.LitePKIBlock import LitePKIBlock
 from ultralytics.nn.modules.v11.MRFA import MRFAConv, C3k2_MRFAConv
 from ultralytics.nn.modules.v11.MSConvStar import MAB
@@ -82,6 +86,7 @@ from ultralytics.nn.modules.v11.MSConvStarLikeSCAM import MABL_SCAM
 from ultralytics.nn.modules.v11.MSConvStarLikeSCAM2 import MABL_SCAM2
 from ultralytics.nn.modules.v11.PATConv import PATConvC3k2, PATConv
 from ultralytics.nn.modules.v11.PKIBlock import PKIBlock11
+from ultralytics.nn.modules.v11.SCSA import C3k2_SCSA, SCSA
 from ultralytics.nn.modules.v11.StarOperation import StarC3k2, StarC2f
 from ultralytics.nn.modules.v11.StripConv import StripConvC3k2, DSC3k_StripBlock
 from ultralytics.nn.modules.v11.StripConvHead import Detect_StripConvHead
@@ -1614,7 +1619,11 @@ def parse_model(d, ch, verbose=True):
             MABL_SCAM,
             MABL_SCAM2,
             StarC3k2,
-            StarC2f
+            StarC2f,
+            C3k2_LGFB,
+            C3k2_SCSA,
+            SCSA,
+            LGFB
         }
     )
 
@@ -1652,9 +1661,12 @@ def parse_model(d, ch, verbose=True):
             C3k2_MRFAConv,
             C3k_DSSA,
             StarC3k2,
-            StarC2f
+            StarC2f,
+            C3k2_LGFB,
+            C3k2_SCSA
         }
     )
+
 
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
         m = (
@@ -1672,8 +1684,19 @@ def parse_model(d, ch, verbose=True):
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
 
-        if m in base_modules:
+        if m in {PoolFormerBlock, PoolFormerMSConvBlock,PoolFormerMSConvBlockV2 }:
+            # PoolFormerBlock: 输出通道等于输入通道
+            c2 = ch[f]  # dim = in_channels
 
+            # YAML 里 args 约定: [pool_size, mlp_ratio, drop]
+            # 这里补上 dim
+            args = [c2, *args]  # -> [dim, pool_size, mlp_ratio, drop]
+
+            # 不要做 make_divisible(width) 也不要 insert repeats 到 args
+            # repeats 由外层 Sequential 处理
+
+
+        elif m in base_modules:
             # ---------------- FeatureFusion (two-input) special case ----------------
             if m is FeatureFusion:
                 # f must be like [idx1, idx2]
@@ -1712,6 +1735,9 @@ def parse_model(d, ch, verbose=True):
                 c2 = ch[f[1]]  # 输出通道固定等于第二路特征的通道（你的实现就是这么设计的）
                 args = [c1, c2]  # 直接覆盖 YAML args（强烈建议）
                 # 不要再对 c2 做 make_divisible(width) 缩放，否则会和“第二路特征通道”对不齐
+            elif m in {SCSA , LGFB}:
+                c2 = ch[f]
+                args = [c2, *args]
 
 
             # ---------------- All other base modules ----------------
@@ -1725,7 +1751,6 @@ def parse_model(d, ch, verbose=True):
                     args[2] = int(
                         max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2]
                     )
-
                 args = [c1, c2, *args[1:]]
                 if m in repeat_modules:
                     args.insert(2, n)  # number of repeats
