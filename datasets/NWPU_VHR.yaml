@@ -1,7 +1,7 @@
 path: ../datas/NWPU_VHR
-train: images/train
-val: images/valid
-test: images/test
+train: train/images
+val: valid/images
+test: test/images
 
 # Classes
 names:
