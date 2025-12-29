@@ -71,6 +71,7 @@ from ultralytics.nn.modules import (
 )
 from ultralytics.nn.modules.backbone.PoolFormer import PoolFormerBlock
 from ultralytics.nn.modules.backbone.PoolFormerMSConvV2 import PoolFormerMSConvBlockV2
+from ultralytics.nn.modules.backbone.PoolFormerMSConvV3 import PoolFormerMSConvBlockV3
 from ultralytics.nn.modules.backbone.PoolFormerMsConv import PoolFormerMSConvBlock
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
@@ -1684,7 +1685,7 @@ def parse_model(d, ch, verbose=True):
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
 
-        if m in {PoolFormerBlock, PoolFormerMSConvBlock,PoolFormerMSConvBlockV2 }:
+        if m in {PoolFormerBlock, PoolFormerMSConvBlock,PoolFormerMSConvBlockV2, PoolFormerMSConvBlockV3 }:
             # PoolFormerBlock: 输出通道等于输入通道
             c2 = ch[f]  # dim = in_channels
 

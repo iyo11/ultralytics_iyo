@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
 
 __all__ = ['PoolFormerMSConvBlockV2']
 
@@ -37,7 +35,6 @@ class ParallelMSConv(nn.Module):
 
         # 分支2：大核 (优化点：移除 dilation)
         # 针对小目标，contiguous (连续) 的感受野比 dilated (空洞) 更好。
-        # 使用 5x5 或 7x7 纯卷积，不使用 dilation=2，避免小目标落入空洞。
         padding = (k_large - 1) // 2
         self.dw_large = nn.Sequential(
             nn.Conv2d(dim, dim, k_large, padding=padding, groups=dim, bias=False),
