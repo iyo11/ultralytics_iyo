@@ -80,6 +80,7 @@ from ultralytics.nn.modules.v11.GatedAttention import C3k2_GatedAttention, Gated
 from ultralytics.nn.modules.v11.InceptionNeXt import InceptionDWConv2d
 from ultralytics.nn.modules.v11.KSFA import KernelSelectiveFusionAttention
 from ultralytics.nn.modules.v11.LGFB import C3k2_LGFB, LGFB
+from ultralytics.nn.modules.v11.LiteGatedAttention import LiteGatedAttention, C3k2_LiteGatedAttention
 from ultralytics.nn.modules.v11.LitePKIBlock import LitePKIBlock
 from ultralytics.nn.modules.v11.MRFA import MRFAConv, C3k2_MRFAConv
 from ultralytics.nn.modules.v11.MSConvStar import MAB
@@ -1629,7 +1630,9 @@ def parse_model(d, ch, verbose=True):
             LGFB,
             KernelSelectiveFusionAttention,
             GatedAttention,
-            C3k2_GatedAttention
+            C3k2_GatedAttention,
+            LiteGatedAttention,
+            C3k2_LiteGatedAttention,
         }
     )
 
@@ -1670,7 +1673,8 @@ def parse_model(d, ch, verbose=True):
             StarC2f,
             C3k2_LGFB,
             C3k2_SCSA,
-            C3k2_GatedAttention
+            C3k2_GatedAttention,
+            C3k2_LiteGatedAttention,
         }
     )
 
