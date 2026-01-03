@@ -989,7 +989,7 @@ class CBLinear(nn.Module):
     def __init__(self, c1: int, c2s: list[int], k: int = 1, s: int = 1, p: int | None = None, g: int = 1):
         """Initialize CBLinear module.
 
-        Args:
+        Args:s
             c1 (int): Input channels.
             c2s (list[int]): List of output channel sizes.
             k (int): Kernel size.

@@ -76,6 +76,7 @@ from ultralytics.nn.modules.backbone.PoolFormerMsConv import PoolFormerMSConvBlo
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
 from ultralytics.nn.modules.v11.FeatureFusion import FeatureFusion
+from ultralytics.nn.modules.v11.GatedAttention import C3k2_GatedAttention, GatedAttention
 from ultralytics.nn.modules.v11.InceptionNeXt import InceptionDWConv2d
 from ultralytics.nn.modules.v11.KSFA import KernelSelectiveFusionAttention
 from ultralytics.nn.modules.v11.LGFB import C3k2_LGFB, LGFB
@@ -1626,7 +1627,9 @@ def parse_model(d, ch, verbose=True):
             C3k2_SCSA,
             SCSA,
             LGFB,
-            KernelSelectiveFusionAttention
+            KernelSelectiveFusionAttention,
+            GatedAttention,
+            C3k2_GatedAttention
         }
     )
 
@@ -1666,7 +1669,8 @@ def parse_model(d, ch, verbose=True):
             StarC3k2,
             StarC2f,
             C3k2_LGFB,
-            C3k2_SCSA
+            C3k2_SCSA,
+            C3k2_GatedAttention
         }
     )
 
