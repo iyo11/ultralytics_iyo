@@ -24,7 +24,7 @@ class ECA(nn.Module):
 # 2. 改进的多尺度异构并行分支 (Split-Parallel MS-Conv)
 # -------------------------
 class SplitParallelMSConv(nn.Module):
-    def __init__(self, dim, k_large=5, k_strip=7):
+    def __init__(self, dim, k_large=3, k_strip=5):
         super().__init__()
         # 确保 dim 能够被 2 整除
         self.dim1 = dim // 2

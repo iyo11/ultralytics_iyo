@@ -77,6 +77,7 @@ from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
 from ultralytics.nn.modules.v11.FeatureFusion import FeatureFusion
 from ultralytics.nn.modules.v11.InceptionNeXt import InceptionDWConv2d
+from ultralytics.nn.modules.v11.KSFA import KernelSelectiveFusionAttention
 from ultralytics.nn.modules.v11.LGFB import C3k2_LGFB, LGFB
 from ultralytics.nn.modules.v11.LitePKIBlock import LitePKIBlock
 from ultralytics.nn.modules.v11.MRFA import MRFAConv, C3k2_MRFAConv
@@ -1624,7 +1625,8 @@ def parse_model(d, ch, verbose=True):
             C3k2_LGFB,
             C3k2_SCSA,
             SCSA,
-            LGFB
+            LGFB,
+            KernelSelectiveFusionAttention
         }
     )
 

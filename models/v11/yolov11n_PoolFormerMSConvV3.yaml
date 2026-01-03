@@ -1,4 +1,4 @@
-# YOLO11-Target-Optimized (Small & Medium Focus)
+# YOLO11-Target-Optimized (Removed P2 Head)
 nc: 80
 scales:
   n: [0.50, 0.25, 1024]
@@ -8,25 +8,13 @@ backbone:
   # [from, repeats, module, args]
   - [-1, 1, Conv, [64, 3, 2]]              # 0-P1/2
   - [-1, 1, Conv, [128, 3, 2]]             # 1-P2/4
-
-  # Stage 2 (P2): 增强底层特征提取
-  - [-1, 3, PoolFormerMSConvBlockV3, [3, 4.0]] # 2-P2/4
-
+  - [-1, 2, PoolFormerMSConvBlockV3, [3, 4.0, 0.0]] # 2-P2/4
   - [-1, 1, Conv, [256, 3, 2]]             # 3-P3/8
-
-  # Stage 3 (P3): 小目标核心层，深度由 6 增加到 9，保持高 ratio
-  - [-1, 9, PoolFormerMSConvBlockV3, [3, 4.0]] # 4-P3/8
-
+  - [-1, 6, PoolFormerMSConvBlockV3, [3, 4.0, 0.0]] # 4-P3/8
   - [-1, 1, Conv, [512, 3, 2]]             # 5-P4/16
-
-  # Stage 4 (P4): 中等目标辅助层，深度 4，下调 ratio 至 3.0
-  - [-1, 4, PoolFormerMSConvBlockV3, [3, 3.0]] # 6-P4/16
-
+  - [-1, 3, PoolFormerMSConvBlockV3, [3, 3.0, 0.0]] # 6-P4/16
   - [-1, 1, Conv, [1024, 3, 2]]            # 7-P5/32
-
-  # Stage 5 (P5): 大目标弱化，深度 1，下调 ratio 至 2.0
-  - [-1, 1, PoolFormerMSConvBlockV3, [3, 2.0]] # 8-P5/32
-
+  - [-1, 2, PoolFormerMSConvBlockV3, [3, 2.0, 0.0]] # 8-P5/32
   - [-1, 1, SPPF, [1024, 5]]               # 9
   - [-1, 2, C2PSA, [1024]]                 # 10
 
@@ -50,5 +38,5 @@ head:
   - [[-1, 10], 1, Concat, [1]]                 # 21 (cat backbone P5)
   - [-1, 2, C3k2, [1024, True]]                # 22 (P5-Head output)
 
-  # 最终检测层
+  # 最终检测层，只保留 P3, P4, P5
   - [[16, 19, 22], 1, Detect, [nc]]            # 23
