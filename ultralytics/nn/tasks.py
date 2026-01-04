@@ -79,6 +79,7 @@ from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
 from ultralytics.nn.modules.v11.FeatureFusion import FeatureFusion
 from ultralytics.nn.modules.v11.GatedAttention import C3k2_GatedAttention, GatedAttention
 from ultralytics.nn.modules.v11.GatedC2PSA import GatedC2PSA
+from ultralytics.nn.modules.v11.GatedSDPA import LiteGatedAttention_SDPA, LiteAttention_SDPA, StandardAttention_SDPA
 from ultralytics.nn.modules.v11.InceptionNeXt import InceptionDWConv2d
 from ultralytics.nn.modules.v11.KSFA import KernelSelectiveFusionAttention
 from ultralytics.nn.modules.v11.LGFB import C3k2_LGFB, LGFB
@@ -1636,7 +1637,10 @@ def parse_model(d, ch, verbose=True):
             C3k2_GatedAttention,
             LiteGatedAttention,
             C3k2_LiteGatedAttention,
-            MultiScaleAdaptiveWindowAttention
+            MultiScaleAdaptiveWindowAttention,
+            LiteGatedAttention_SDPA,
+            LiteAttention_SDPA,
+            StandardAttention_SDPA
         }
     )
 
