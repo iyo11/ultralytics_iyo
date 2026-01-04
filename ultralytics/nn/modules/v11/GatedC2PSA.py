@@ -3,7 +3,7 @@ import torch.nn as nn
 
 __all__ = ['GatedC2PSA']
 
-from build.lib.ultralytics.nn.modules import Conv
+from ultralytics.nn.modules.conv import Conv
 from ultralytics.nn.modules.block import PSABlock
 
 
