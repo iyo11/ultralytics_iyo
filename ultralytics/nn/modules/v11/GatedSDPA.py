@@ -103,6 +103,51 @@ class C3k2_LiteGatedAttention_SDPA(C2f):
 #对比
 
 
+class GatedAttention_SDPA(nn.Module):
+    def __init__(self, d_model, n_heads=8, headwise=True, elementwise=True):
+        super().__init__()
+        assert d_model % n_heads == 0
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+
+        # 标准 Q, K, V 投影
+        self.w_q = nn.Linear(d_model, d_model)
+        self.w_k = nn.Linear(d_model, d_model)
+        self.w_v = nn.Linear(d_model, d_model)
+        self.w_o = nn.Linear(d_model, d_model)
+
+        # 门控投影层：不进行空间缩减，直接作用于原尺寸特征
+        self.gate_proj = nn.Linear(d_model, d_model if (headwise and elementwise) else n_heads)
+        self.ln = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+
+        # 1. 预处理
+        x_flat = rearrange(x, 'b c h w -> b (h w) c')
+        x_norm = self.ln(x_flat)
+
+        # 2. 生成 Q, K, V (注意：这里 K 和 V 保持全长，不进行 SR 压缩)
+        q = self.w_q(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
+        k = self.w_k(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
+        v = self.w_v(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
+
+        # 3. 官方 SDPA 优化计算
+        # 计算量为 O((H*W)^2)，但在 4090 上受 FlashAttention 加持，速度依然很快
+        y = F.scaled_dot_product_attention(q, k, v)
+
+        # 4. 门控逻辑 (Gating)
+        # 门控信号同样基于全量特征生成
+        gate = torch.sigmoid(self.gate_proj(x_norm))
+        gate = gate.view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
+        y = y * gate
+
+        # 5. 输出变换
+        y = y.transpose(1, 2).contiguous().view(b, -1, self.d_model)
+        out = self.w_o(y)
+
+        return rearrange(out, 'b (h w) c -> b c h w', h=h, w=w)
 
 class LiteAttention_SDPA(nn.Module):
     def __init__(self, d_model, n_heads=8, reduction_ratio=2):
