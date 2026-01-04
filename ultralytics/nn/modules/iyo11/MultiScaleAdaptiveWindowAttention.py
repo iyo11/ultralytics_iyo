@@ -1,81 +1,98 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from ultralytics.nn.modules.conv import autopad
 
 __all__ = ['MultiScaleAdaptiveWindowAttention']
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+
+def channel_shuffle(x, groups):
+    """通道重组：打乱分组卷积后的特征，增强信息流动"""
+    batchsize, num_channels, height, width = x.data.size()
+    channels_per_group = num_channels // groups
+    # reshape
+    x = x.view(batchsize, groups, channels_per_group, height, width)
+    x = torch.transpose(x, 1, 2).contiguous()
+    # flatten
+    return x.view(batchsize, -1, height, width)
 
 
 class MultiScaleAdaptiveWindowAttention(nn.Module):
-    def __init__(self, dim, window_sizes=(3, 5, 7), reduction=16):
+    # YOLO 会自动传入 c1 (输入通道), c2 (输出通道)
+    def __init__(self, c1, c2, window_sizes=(3, 5), reduction=8):
         super().__init__()
-        # 强制 dim 必须是 8 的倍数（YOLO 默认符合）
-        self.dim = dim
-        self.window_sizes = [window_sizes] if isinstance(window_sizes, int) else list(window_sizes)
 
-        # 1. 核心卷积：全部使用 Depthwise 卷积，参数量极低
+        # 1. 首先定义所有基础属性，防止 AttributeError
+        self.groups = 8
+        self.window_sizes = [window_sizes] if isinstance(window_sizes, int) else list(window_sizes)
+        self.inter_dim = max(c2 // reduction, 16)
+
+        # 2. 极致压缩计算量的投影层 (使用分组卷积)
+        self.proj_in = nn.Sequential(
+            nn.Conv2d(c1, self.inter_dim, 1, groups=self.groups, bias=False),
+            nn.BatchNorm2d(self.inter_dim),
+            nn.SiLU()
+        )
+
+        # 3. 轻量化多尺度 DW 卷积
         self.attn_convs = nn.ModuleList([
-            nn.Conv2d(dim, dim, k, padding=k // 2, groups=dim, bias=False)
+            nn.Conv2d(self.inter_dim, self.inter_dim, k, padding=autopad(k, None),
+                      groups=self.inter_dim, bias=False)
             for k in self.window_sizes
         ])
 
-        # 2. 尺度选择器：将中间通道数压缩到极小 (如 256 -> 16)
-        mid_dim = max(dim // reduction, 8)
+        # 4. 尺度选择器
         self.scale_fc = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(dim, mid_dim, 1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(mid_dim, len(self.window_sizes), 1, bias=False)
+            nn.Conv2d(self.inter_dim, len(self.window_sizes), 1, bias=False),
+            nn.Softmax(dim=1)
         )
 
-        # 3. 空间门控：使用通道池化代替卷积提取空间特征，仅用一个 7x7 DW 卷积
-        self.spatial_conv = nn.Conv2d(2, 1, 7, padding=3, bias=False)
-        self.sigmoid = nn.Sigmoid()
+        # 5. 极致轻量化门控 (DW + PW 结构)
+        self.spatial_gate = nn.Sequential(
+            nn.Conv2d(2, 2, 3, padding=1, groups=2, bias=False),
+            nn.Conv2d(2, 1, 1, bias=False),
+            nn.Sigmoid()
+        )
 
-        # 4. 最后投影：改为 Pointwise 卷积或直接省略。
-        # 这里为了保持特征一致性，只使用一个最基本的 Scale 缩放
-        self.alpha = nn.Parameter(torch.ones(1, dim, 1, 1) * 0.1)
+        # 6. 输出投影 (c2 确保与 YOLO 下一层匹配)
+        self.proj_out = nn.Sequential(
+            nn.Conv2d(self.inter_dim, c2, 1, groups=self.groups, bias=False),
+            nn.BatchNorm2d(c2)
+        )
+
+        self.alpha = nn.Parameter(torch.tensor([0.1]))
 
     def forward(self, x):
         B, C, H, W = x.shape
 
-        # 多尺度 DW 卷积提取
-        feats = [conv(x) for conv in self.attn_convs]
+        # 通道压缩 + Shuffle (计算量大幅下降)
+        x_reduced = self.proj_in(x)
+        if C >= self.groups:  # 确保可以 shuffle
+            x_reduced = channel_shuffle(x_reduced, self.groups)
 
-        # 计算尺度权重并 Softmax
-        # 结果形状: [B, 窗口数, 1, 1, 1]
-        scale_weights = self.scale_fc(x).view(B, len(self.window_sizes), 1, 1, 1)
-        scale_weights = torch.softmax(scale_weights, dim=1)
+        # 多尺度特征提取 + 尺寸强制对齐 (解决 8 vs 9 RuntimeError)
+        feats = []
+        for conv in self.attn_convs:
+            f = conv(x_reduced)
+            if f.shape[-2:] != (H, W):
+                f = F.interpolate(f, size=(H, W), mode='nearest')
+            feats.append(f)
 
-        # 融合特征
+        # 动态尺度融合
+        scale_weights = self.scale_fc(x_reduced)
         fused = 0
-        for i, feat in enumerate(feats):
-            fused = fused + feat * scale_weights[:, i]
+        for i in range(len(self.window_sizes)):
+            fused = fused + feats[i] * scale_weights[:, i:i + 1]
 
-        # 空间注意力门控 (Channel Pool: Mean & Max)
+        # 空间注意力门控
         avg_out = torch.mean(fused, dim=1, keepdim=True)
         max_out, _ = torch.max(fused, dim=1, keepdim=True)
         spatial_mask = torch.cat([avg_out, max_out], dim=1)
-        gate = self.sigmoid(self.spatial_conv(spatial_mask))
+        gate = self.spatial_gate(spatial_mask)
 
-        # 最终输出 = 原始残差 + 增强特征
-        return x + self.alpha * (fused * gate)
-# 测试不同输入尺寸
-if __name__ == "__main__":
-    # 定义模块
-    msa = MultiScaleAdaptiveWindowAttention(dim=256, window_sizes=(3,5,7), reduction=4)
+        # 还原维度 + 残差连接
+        out = self.proj_out(fused * gate)
 
-    # 模拟输入特征图: B=1, C=256, H=32, W=32
-    x = torch.randn(1, 256, 32, 32)
-    y = msa(x)
-    print("Input shape :", x.shape)
-    print("Output shape:", y.shape)
-
-    # 测试其他尺寸
-    for H, W in [(64, 64), (33, 33), (128, 128)]:
-        x = torch.randn(1, 256, H, W)
-        y = msa(x)
-        print(f"Input shape: {x.shape} -> Output shape: {y.shape}")
+        # 如果输入输出通道不一致（通常在 YOLO 中 c1=c2），这里会自动处理
+        return (x + self.alpha * out) if C == out.shape[1] else out
