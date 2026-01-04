@@ -73,10 +73,12 @@ from ultralytics.nn.modules.backbone.PoolFormer import PoolFormerBlock
 from ultralytics.nn.modules.backbone.PoolFormerMSConvV2 import PoolFormerMSConvBlockV2
 from ultralytics.nn.modules.backbone.PoolFormerMSConvV3 import PoolFormerMSConvBlockV3
 from ultralytics.nn.modules.backbone.PoolFormerMsConv import PoolFormerMSConvBlock
+from ultralytics.nn.modules.iyo11.MultiScaleAdaptiveWindowAttention import MultiScaleAdaptiveWindowAttention
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
 from ultralytics.nn.modules.v11.FeatureFusion import FeatureFusion
 from ultralytics.nn.modules.v11.GatedAttention import C3k2_GatedAttention, GatedAttention
+from ultralytics.nn.modules.v11.GatedC2PSA import GatedC2PSA
 from ultralytics.nn.modules.v11.InceptionNeXt import InceptionDWConv2d
 from ultralytics.nn.modules.v11.KSFA import KernelSelectiveFusionAttention
 from ultralytics.nn.modules.v11.LGFB import C3k2_LGFB, LGFB
@@ -1562,6 +1564,7 @@ def parse_model(d, ch, verbose=True):
             SPPF,
             C2fPSA,
             C2PSA,
+            GatedC2PSA,
             DWConv,
             Focus,
             BottleneckCSP,
@@ -1633,6 +1636,7 @@ def parse_model(d, ch, verbose=True):
             C3k2_GatedAttention,
             LiteGatedAttention,
             C3k2_LiteGatedAttention,
+            MultiScaleAdaptiveWindowAttention
         }
     )
 

@@ -23,11 +23,11 @@ close_mosaic_count = 30
 if __name__ == '__main__':
     #model = YOLO('yolov8n.yaml')
     #model = YOLO('../models/v11/yolov11n_PoolFormer.yaml')
-    model = YOLO('../models/v11/yolov11n_LiteGatedAttention1.yaml')
+    model = YOLO('../models/v11/yolov11n_GatedC2PSA.yaml')
     # 如何切换模型版本, 上面的ymal文件可以改为 yolov8s.yaml就是使用的v8s,
     # 类似某个改进的yaml文件名称为yolov8-XXX.yaml那么如果想使用其它版本就把上面的名称改为yolov8l-XXX.yaml即可（改的是上面YOLO中间的名字不是配置文件的）！
     # model.load('yolov8n.pt') # 是否加载预训练权重,科研不建议大家加载否则很难提升精度
-    model.train(data= datasets_path + '/RSOD.yaml',
+    model.train(data= datasets_path + '/NWPU_VHR.yaml',
                 cache=cacheTF,
                 imgsz=640,
                 epochs=epoch_count,
@@ -43,7 +43,7 @@ if __name__ == '__main__':
                 amp=False,  # 如果出现训练损失为Nan可以关闭amp
                 patience=0,
                 project='../runs/train',
-                name='v11n_GatedAttention_RSOD_300',
+                name='v11n_MSAWA_NWPU_300',
                 save_period=20,
                 #固定随机种子
                 seed=42
