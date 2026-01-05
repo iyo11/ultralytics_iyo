@@ -74,6 +74,7 @@ from ultralytics.nn.modules.backbone.PoolFormerMSConvV2 import PoolFormerMSConvB
 from ultralytics.nn.modules.backbone.PoolFormerMSConvV3 import PoolFormerMSConvBlockV3
 from ultralytics.nn.modules.backbone.PoolFormerMsConv import PoolFormerMSConvBlock
 from ultralytics.nn.modules.iyo11.C2LGA import LGA_SDPA, C2LGA
+from ultralytics.nn.modules.iyo11.C2LGAv2 import C2LGA_V2
 from ultralytics.nn.modules.iyo11.C3LGPSA import C3LGPSA
 from ultralytics.nn.modules.iyo11.MultiScaleAdaptiveWindowAttention import MultiScaleAdaptiveWindowAttention
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
@@ -1647,6 +1648,7 @@ def parse_model(d, ch, verbose=True):
             GatedAttention_SDPA,
             LGA_SDPA,
             C2LGA,
+            C2LGA_V2,
             C3LGPSA
         }
     )
@@ -1691,6 +1693,7 @@ def parse_model(d, ch, verbose=True):
             C3k2_GatedAttention,
             C3k2_LiteGatedAttention,
             C2LGA,
+            C2LGA_V2,
             LGA_SDPA,
             C3LGPSA
         }

@@ -92,7 +92,7 @@ class C2LGA(nn.Module):
     对应 YOLO11 中的 C2PSA，用于直接对比实验。
     """
 
-    def __init__(self, c1, c2, n=1, e=0.5, r=1):
+    def __init__(self, c1, c2, n=1, e=0.5, r=2):
         super().__init__()
         assert c1 == c2
         self.c = int(c1 * e)
