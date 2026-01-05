@@ -89,6 +89,7 @@ from .head import (
     YOLOESegment,
     v10Detect,
 )
+from .iyo11.C2LGA import LGA_SDPA
 from .transformer import (
     AIFI,
     MLP,
@@ -179,4 +180,5 @@ __all__ = (
     "YOLOEDetect",
     "YOLOESegment",
     "v10Detect",
+    "LGA_SDPA"
 )

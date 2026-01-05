@@ -1,64 +1,170 @@
-import torch
-import cv2
+import sys
+import warnings
+
+warnings.filterwarnings('ignore')
+warnings.simplefilter('ignore')
+import torch, yaml, cv2, os, shutil
 import numpy as np
+
+np.random.seed(0)
 import matplotlib.pyplot as plt
-from ultralytics import YOLO
-
-# 1. 加载你训练好的模型 (包含 LGASDPA 或 StandardSDPA)
-model = YOLO(r"C:\Users\IYO\Desktop\fsdownload\train\v11n_LGASDPA_NWPU_300\weights\best.pt")
-
-# 用于存储提取的注意力权重
-attention_weights = []
-
-
-# 2. 定义 Hook 函数
-def hook_fn(module, input, output):
-    # 注意：SDPA 的输出通常是 (batch, heads, seq_len, seq_len) 或 (batch, heads, h, w)
-    # 这里我们捕获它并存入列表
-    attention_weights.append(output.detach())
+from tqdm import trange
+from PIL import Image
+from ultralytics.nn.tasks import DetectionModel as Model
+from ultralytics.utils.torch_utils import intersect_dicts
+from ultralytics.utils.ops import xywh2xyxy
+from pytorch_grad_cam import GradCAMPlusPlus, GradCAM, XGradCAM
+from pytorch_grad_cam.utils.image import show_cam_on_image
+from pytorch_grad_cam.activations_and_gradients import ActivationsAndGradients
 
 
-# 3. 注册 Hook
-# 你需要根据模型结构找到具体的注意力层名称
-# 假设你的 SDPA 模块在某个 C3k2 或 C2PSA 内部
-target_layer = None
-for name, module in model.model.named_modules():
-    if "StandardAttention_SDPA" in str(type(module)):
-        target_layer = module
-        print(f"成功定位目标层: {name}")
-        target_layer.register_forward_hook(hook_fn)
-        break
+def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
+    # Resize and pad image while meeting stride-multiple constraints
+    shape = im.shape[:2]  # current shape [height, width]
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
 
-# 4. 读取图片并进行推理
-img_path = r"E:\datas\NWPU_VHR\valid\images\000563_jpg.rf.58f27b06e0a2b512f3cfa416b270527e.jpg"
-results = model.predict(img_path, conf=0.25)
+    # Scale ratio (new / old)
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    if not scaleup:  # only scale down, do not scale up (for better val mAP)
+        r = min(r, 1.0)
 
-# 5. 处理并可视化热力图
-if attention_weights:
-    # 假设权重形状为 [1, num_heads, h*w, h*w]，取所有 head 的平均值
-    attn = attention_weights[0][0].mean(dim=0).cpu().numpy()
+    # Compute padding
+    ratio = r, r  # width, height ratios
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+    if auto:  # minimum rectangle
+        dw, dh = np.mod(dw, stride), np.mod(dh, stride)  # wh padding
+    elif scaleFill:  # stretch
+        dw, dh = 0.0, 0.0
+        new_unpad = (new_shape[1], new_shape[0])
+        ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]  # width, height ratios
 
-    # 将长向量 Reshape 回二维特征图形状 (根据你的特征图大小调整)
-    # 例如特征图是 20x20
-    side = int(np.sqrt(attn.shape[-1]))
-    heatmap = attn.mean(axis=0).reshape(side, side)
+    dw /= 2  # divide padding into 2 sides
+    dh /= 2
 
-    # 归一化处理
-    heatmap = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
-    heatmap = np.uint8(255 * heatmap)
+    if shape[::-1] != new_unpad:  # resize
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
+    return im, ratio, (dw, dh)
 
-    # 使用 OpenCV 生成伪彩色图
-    heatmap_img = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
 
-    # 读取原图并叠加
-    raw_img = cv2.imread(img_path)
-    heatmap_img = cv2.resize(heatmap_img, (raw_img.shape[1], raw_img.shape[0]))
-    combined = cv2.addWeighted(raw_img, 0.6, heatmap_img, 0.4, 0)
+class yolov11_heatmap:
+    def __init__(self, weight, cfg, device, method, layer, backward_type, conf_threshold, ratio):
+        device = torch.device(device)
+        ckpt = torch.load(weight)
+        model_names = ckpt['model'].names
+        csd = ckpt['model'].float().state_dict()  # checkpoint state_dict as FP32
+        model = Model(cfg, ch=3, nc=len(model_names)).to(device)
+        csd = intersect_dicts(csd, model.state_dict(), exclude=['anchor'])  # intersect
+        model.load_state_dict(csd, strict=False)  # load
+        model.eval()
+        print(f'Transferred {len(csd)}/{len(model.state_dict())} items')
 
-    # 展示结果
-    plt.figure(figsize=(10, 5))
-    plt.imshow(cv2.cvtColor(combined, cv2.COLOR_COLOR_BGR2RGB))
-    plt.title("SDPA Attention Heatmap")
-    plt.show()
-else:
-    print("未捕获到注意力权重，请检查 target_layer 是否正确。")
+        target_layers = [eval(layer)]
+        method = eval(method)
+
+        colors = np.random.uniform(0, 255, size=(len(model_names), 3)).astype(np.int32)
+        self.__dict__.update(locals())
+
+    def post_process(self, result):
+        logits_ = result[:, 4:]
+        boxes_ = result[:, :4]
+        sorted, indices = torch.sort(logits_.max(1)[0], descending=True)
+        return torch.transpose(logits_[0], dim0=0, dim1=1)[indices[0]], torch.transpose(boxes_[0], dim0=0, dim1=1)[
+            indices[0]], xywh2xyxy(torch.transpose(boxes_[0], dim0=0, dim1=1)[indices[0]]).cpu().detach().numpy()
+
+    def draw_detections(self, box, color, name, img):
+        xmin, ymin, xmax, ymax = list(map(int, list(box)))
+        cv2.rectangle(img, (xmin, ymin), (xmax, ymax), tuple(int(x) for x in color), 2)
+        cv2.putText(img, str(name), (xmin, ymin - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.8, tuple(int(x) for x in color), 2,
+                    lineType=cv2.LINE_AA)
+        return img
+
+    def __call__(self, img_path, save_path):
+        # remove dir if exist
+        if os.path.exists(save_path):
+            shutil.rmtree(save_path)
+        # make dir if not exist
+        os.makedirs(save_path, exist_ok=True)
+
+        # img process
+        img = cv2.imread(img_path)
+        img = letterbox(img)[0]
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = np.float32(img) / 255.0
+        tensor = torch.from_numpy(np.transpose(img, axes=[2, 0, 1])).unsqueeze(0).to(self.device)
+
+        # init ActivationsAndGradients
+        grads = ActivationsAndGradients(self.model, self.target_layers, reshape_transform=None)
+
+        # get ActivationsAndResult
+        result = grads(tensor)
+        activations = grads.activations[0].cpu().detach().numpy()
+
+        # postprocess to yolo output
+        post_result, pre_post_boxes, post_boxes = self.post_process(result[0])
+        for i in trange(int(post_result.size(0) * self.ratio)):
+            if float(post_result[i].max()) < self.conf_threshold:
+                break
+
+            self.model.zero_grad()
+            # get max probability for this prediction
+            if self.backward_type == 'class' or self.backward_type == 'all':
+                score = post_result[i].max()
+                score.backward(retain_graph=True)
+
+            if self.backward_type == 'box' or self.backward_type == 'all':
+                for j in range(4):
+                    score = pre_post_boxes[i, j]
+                    score.backward(retain_graph=True)
+
+            # process heatmap
+            if self.backward_type == 'class':
+                gradients = grads.gradients[0]
+            elif self.backward_type == 'box':
+                gradients = grads.gradients[0] + grads.gradients[1] + grads.gradients[2] + grads.gradients[3]
+            else:
+                gradients = grads.gradients[0] + grads.gradients[1] + grads.gradients[2] + grads.gradients[3] + \
+                            grads.gradients[4]
+            b, k, u, v = gradients.size()
+            weights = self.method.get_cam_weights(self.method, None, None, None, activations,
+                                                  gradients.detach().numpy())
+            weights = weights.reshape((b, k, 1, 1))
+            saliency_map = np.sum(weights * activations, axis=1)
+            saliency_map = np.squeeze(np.maximum(saliency_map, 0))
+            saliency_map = cv2.resize(saliency_map, (tensor.size(3), tensor.size(2)))
+            saliency_map_min, saliency_map_max = saliency_map.min(), saliency_map.max()
+            if (saliency_map_max - saliency_map_min) == 0:
+                continue
+            saliency_map = (saliency_map - saliency_map_min) / (saliency_map_max - saliency_map_min)
+
+            # add heatmap and box to image
+            cam_image = show_cam_on_image(img.copy(), saliency_map, use_rgb=True)
+            "不想在图片中绘画出边界框和置信度，注释下面的一行代码即可"
+            cam_image = self.draw_detections(post_boxes[i], self.colors[int(post_result[i, :].argmax())],
+                                             f'{self.model_names[int(post_result[i, :].argmax())]} {float(post_result[i].max()):.2f}',
+                                             cam_image)
+            cam_image = Image.fromarray(cam_image)
+            cam_image.save(f'{save_path}/{i}.png')
+
+
+def get_params():
+    params = {
+        'weight': r'C:\Users\IYO\Desktop\fsdownload\train\v11n_LGASDPA_NWPU_300\weights\best.pt',  # 训练出来的权重文件
+        'cfg': r'F:\ultralytics-main\models\v11\yolov11n_LGASDPA.yaml',  # 训练权重对应的yaml配置文件
+        'device': 'cuda:0',
+        'method': 'GradCAM',  # GradCAMPlusPlus, GradCAM, XGradCAM , 使用的热力图库文件不同的效果不一样可以多尝试
+        'layer': 'model.model[16]',  # 想要检测的对应层
+        'backward_type': 'all',  # class, box, all
+        'conf_threshold': 0.25,  # 0.6  # 置信度阈值，有的时候你的进度条到一半就停止了就是因为没有高于此值的了
+        'ratio': 0.01  # 0.02-0.1
+    }
+    return params
+
+
+if __name__ == '__main__':
+    model = yolov11_heatmap(**get_params())
+    model(r'E:\datas\NWPU_VHR\train\images\000518_jpg.rf.ece96cb1419cd5cb39f76e56063e031c.jpg', 'result')  # 第一个是检测的文件, 第二个是保存的路径
