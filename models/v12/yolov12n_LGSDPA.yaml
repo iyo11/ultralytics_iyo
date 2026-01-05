@@ -1,0 +1,41 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# 修改说明：在第9层插入LGA_SDPA，并修正后续所有Concat和Detect的索引
+
+# Parameters
+nc: 80 # number of classes
+scales: # model compound scaling constants
+  n: [0.50, 0.25, 1024] # YOLO12n (这里根据你实际使用的模型规模调整)
+
+# YOLO12n backbone
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 2, C3k2, [128, False, 0.25]]
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
+  - [-1, 2, C3k2, [256, False, 0.25]]
+  - [-1, 1, Conv, [512, 3, 2]] # 5-P4/16
+  - [-1, 4, A2C2f, [512, True, 4]]
+  - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
+  - [-1, 4, A2C2f, [1024, True, 1]]
+  - [-1, 1, LGA_SDPA, [1024]] # 9: 新插入的模块，基于P5特征
+
+# YOLO12n head
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 10
+  - [[-1, 6], 1, Concat, [1]] # 11: 连接到Backbone的P4 (原索引6不变)
+  - [-1, 2, A2C2f, [512, False, -1]] # 12: P4特征融合
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 13
+  - [[-1, 4], 1, Concat, [1]] # 14: 连接到Backbone的P3 (原索引4不变)
+  - [-1, 2, A2C2f, [256, False, -1]] # 15 (P3输出层)
+
+  - [-1, 1, Conv, [256, 3, 2]] # 16
+  - [[-1, 12], 1, Concat, [1]] # 17: 【修正点】连接到第12层(修正前的11层)
+  - [-1, 2, A2C2f, [512, False, -1]] # 18 (P4输出层)
+
+  - [-1, 1, Conv, [512, 3, 2]] # 19
+  - [[-1, 9], 1, Concat, [1]] # 20: 【修正点】连接到第9层(LGA输出)，原为8
+  - [-1, 2, C3k2, [1024, True]] # 21 (P5输出层)
+
+  - [[15, 18, 21], 1, Detect, [nc]] # 22: 【修正点】检测头对应 P3, P4, P5

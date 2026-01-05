@@ -105,3 +105,58 @@ class C2LGA(nn.Module):
     def forward(self, x):
         a, b = self.cv1(x).chunk(2, 1)
         return self.cv2(torch.cat((a, self.m(b)), 1))
+
+
+class Light_LGA_SDPA(nn.Module):
+    def __init__(self, d_model, n_heads=8, reduction_ratio=2):
+        super().__init__()
+        # 自动调整 head 数量：如果通道数比 head 小，则 head 取通道数，确保能整除
+        if d_model < n_heads:
+            n_heads = d_model
+        while d_model % n_heads != 0:
+            n_heads -= 1
+
+        self.d_model = d_model
+        self.n_heads = n_heads
+
+        # 1x1 卷积替代 Linear，直接在 4D Tensor 上操作，减少 rearrange 频率
+        self.qkv_proj = nn.Conv2d(d_model, inner_dim * 3, kernel_size=1, bias=False)
+        self.o_proj = nn.Conv2d(inner_dim, d_model, kernel_size=1, bias=False)
+
+        # 极简门控：使用通道注意力形式或更小的投影
+        self.gate_proj = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(d_model, inner_dim, 1),
+            nn.Sigmoid()
+        )
+
+        # 空间压缩
+        self.sr = nn.AvgPool2d(kernel_size=reduction_ratio) if reduction_ratio > 1 else nn.Identity()
+        self.bn = nn.BatchNorm2d(d_model)
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        x = self.bn(x)
+
+        # 1. 生成 QKV (使用 Conv2d 效率更高)
+        qkv = self.qkv_proj(x)  # b, inner*3, h, w
+        q, k, v = qkv.chunk(3, dim=1)
+
+        # 空间压缩 K, V
+        k, v = self.sr(k), self.sr(w)
+
+        # 准备进入 SDPA (rearrange 移到这里)
+        q = rearrange(q, 'b (g d) h w -> b g (h w) d', g=self.n_heads)
+        k = rearrange(k, 'b (g d) h w -> b g (h w) d', g=self.n_heads)
+        v = rearrange(v, 'b (g d) h w -> b g (h w) d', g=self.n_heads)
+
+        # 2. SDPA 优化
+        y = F.scaled_dot_product_attention(q, k, v)
+
+        # 3. 门控调制 (此时 gate 是 b, inner, 1, 1)
+        y = rearrange(y, 'b g (h w) d -> b (g d) h w', h=h, w=w)
+        gate = self.gate_proj(x)
+        y = y * gate
+
+        # 4. 投影回原维度
+        return self.o_proj(y)

@@ -27,6 +27,7 @@ backbone:
   - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
   - [-1, 4, A2C2f, [1024, True, 1]] # 8
 
+
 # YOLO12n head
 head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
