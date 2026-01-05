@@ -1645,7 +1645,8 @@ def parse_model(d, ch, verbose=True):
             StandardAttention_SDPA,
             GatedAttention_SDPA,
             LGA_SDPA,
-            C2LGA
+            C2LGA,
+            LGA_SDPA
         }
     )
 
@@ -1688,7 +1689,8 @@ def parse_model(d, ch, verbose=True):
             C3k2_SCSA,
             C3k2_GatedAttention,
             C3k2_LiteGatedAttention,
-            C2LGA
+            C2LGA,
+            LGA_SDPA
         }
     )
 
