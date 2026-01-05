@@ -4,10 +4,36 @@ import torch.nn.functional as F
 from einops import rearrange
 from ultralytics.nn.modules import Conv
 
-__all__ = ['C3LGA_PSA']
+__all__ = ['C3LGPSA']
+
+
+class GatedSpatialAttention(nn.Module):
+    """带门控的空间注意力模块 (GSA)"""
+
+    def __init__(self, c, kernel_size=7):
+        super().__init__()
+        # 空间路径：关注“在哪里看”
+        self.spa_conv = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=kernel_size // 2, bias=False)
+        # 门控路径：关注“哪些特征重要” (类似 LGA 的 gate_proj)
+        self.gate_conv = nn.Conv2d(c, c, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # 1. 空间权重生成
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        spa_weight = self.sigmoid(self.spa_conv(torch.cat([avg_out, max_out], dim=1)))
+
+        # 2. 门控信号生成
+        gate = self.sigmoid(self.gate_conv(x))
+
+        # 3. 融合：输入 * 空间权重 * 门控信号
+        return x * spa_weight * gate
+
 
 class LGA_SDPA(nn.Module):
-    """Lite Gated Attention with SDPA optimization (原版)。"""
+    """Lite Gated Attention with SDPA optimization."""
+
     def __init__(self, d_model, n_heads=8, reduction_ratio=2):
         super().__init__()
         assert d_model % n_heads == 0
@@ -48,6 +74,7 @@ class LGA_SDPA(nn.Module):
         k = self.w_k(x_sr).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
         v = self.w_v(x_sr).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
 
+        # RTX 4090 优化
         y = F.scaled_dot_product_attention(q, k, v)
 
         gate = torch.sigmoid(self.gate_proj(x_norm))
@@ -59,72 +86,36 @@ class LGA_SDPA(nn.Module):
         return rearrange(out, 'b (h w) c -> b c h w', h=h, w=w)
 
 
-class PSABlock(nn.Module):
-    """原 PSA Block，可以作为三路之一"""
-    def __init__(self, c, n_heads=8, r=2):
+class C3LGPSA(nn.Module):
+    """
+    C3LGPSA: 带有双重门控的三路并行模块
+    1. Identity: 保留原始信息
+    2. LGA: 门控注意力 (处理全局/通道关系)
+    3. GSA: 门控空间注意力 (处理局部显著性)
+    """
+
+    def __init__(self, c1, c2, n=1, e=0.5, r=2):
         super().__init__()
-        self.attn = LGA_SDPA(c, n_heads=n_heads, reduction_ratio=r)
-        self.ffn = nn.Sequential(
-            Conv(c, c * 2, 1),
-            Conv(c * 2, c, 1, act=False)
+        assert c1 == c2
+        self.c_part = int(c1 * e)
+        self.cv1 = Conv(c1, 3 * self.c_part, 1, 1)
+        self.cv2 = Conv(3 * self.c_part, c1, 1)
+
+        # LGA 分支
+        self.lga_branch = nn.Sequential(
+            *(LGA_SDPA(self.c_part, n_heads=self.c_part // 64 if self.c_part >= 64 else 1, reduction_ratio=r) for _ in
+              range(n))
         )
+
+        # 修改后的门控空间分支 (GSA)
+        self.gsa_branch = GatedSpatialAttention(self.c_part, kernel_size=7)
 
     def forward(self, x):
-        x = x + self.attn(x)
-        x = x + self.ffn(x)
-        return x
+        x_a, x_b, x_c = self.cv1(x).chunk(3, 1)
 
+        # 三路并行并行计算
+        out_a = x_a
+        out_b = self.lga_branch(x_b)
+        out_c = self.gsa_branch(x_c)
 
-class C3LGA_PSA(nn.Module):
-    """
-    三路融合模块：
-    - Identity (50%)
-    - PSA (30%)
-    - LGA (20%)
-    带门控融合，适合中小目标检测
-    """
-    def __init__(self, c: int, r: int = 2):
-        super().__init__()
-        c_mid = c
-
-        self.c_id  = int(0.5 * c_mid)
-        self.c_psa = int(0.3 * c_mid)
-        self.c_lga = c_mid - self.c_id - self.c_psa  # 剩余通道
-
-        # 通道变换
-        self.cv1 = Conv(c, c_mid, 1)
-
-        # 三路模块
-        self.psa = PSABlock(self.c_psa)
-        self.lga = LGA_SDPA(self.c_lga, reduction_ratio=r)
-
-        # PSA门控（由 Identity 控制）
-        self.gate_psa = nn.Sequential(
-            Conv(self.c_id, self.c_psa, 1),
-            nn.Sigmoid()
-        )
-        # LGA门控（由全局上下文控制）
-        self.gate_lga = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            Conv(c_mid, self.c_lga, 1),
-            nn.Sigmoid()
-        )
-
-        # 输出融合后的 FFN
-        self.ffn = nn.Sequential(
-            Conv(c_mid, c_mid * 2, 1),
-            Conv(c_mid * 2, c_mid, 1, act=False)
-        )
-
-    def forward(self, x):
-        x = self.cv1(x)
-        x_id, x_psa, x_lga = torch.split(x, [self.c_id, self.c_psa, self.c_lga], dim=1)
-
-        # 三路
-        psa_out = self.psa(x_psa) * self.gate_psa(x_id)
-        lga_out = self.lga(x_lga) * self.gate_lga(x)
-
-        # 加权融合
-        y = x_id + psa_out + lga_out
-        y = y + self.ffn(y)
-        return y
+        return self.cv2(torch.cat((out_a, out_b, out_c), 1))
