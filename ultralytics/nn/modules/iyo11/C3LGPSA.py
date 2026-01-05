@@ -82,8 +82,8 @@ class LGA_SDPA(nn.Module):
 
 class C3LGPSA(nn.Module):
     """
-    C3LGPSA: 全通道并行版本
-    融合策略: Concat + Conv 1x1 Fusion (替代原有的 split + softmax)
+    C3LGPSA v2: 全通道并行 + 极简加权融合 (Weighted Sum)
+    解决了参数量过大的问题，同时保留了三路全通道特征提取。
     """
 
     def __init__(self, c1, c2, n=1, e=0.5, r=2):
@@ -91,14 +91,14 @@ class C3LGPSA(nn.Module):
         assert c1 == c2
         self.c = c1
 
-        # 1. 预处理卷积
+        # 1. 输入预处理
         self.cv1 = Conv(c1, c1, 1, 1)
 
         # 2. 三路分支 (全部使用完整通道 c1)
-        # 第一路: Identity (无参数，直接用 x_in)
+        # 第一路: Identity (直接使用输入)
 
         # 第二路: LGA (全局注意力)
-        # 此时 c1 通常是 16, 32, 64 等，n_heads 必能整除
+        # 此时 c1 是 64/128/256 等，必能被 n_heads 整除
         n_heads = max(1, c1 // 32)
         self.lga_branch = nn.Sequential(
             *(LGA_SDPA(c1, n_heads=n_heads, reduction_ratio=r) for _ in range(n))
@@ -107,25 +107,30 @@ class C3LGPSA(nn.Module):
         # 第三路: GSA (局部空间注意力)
         self.gsa_branch = GatedSpatialAttention(c1, kernel_size=7)
 
-        # 3. 融合层: 将三路 (c1 + c1 + c1) 融合回 c1
-        self.cv_fusion = Conv(c1 * 3, c1, 1, 1)
+        # 3. 极简融合层: 可学习的动态权重分配
+        # 产生 3 个权重，分别对应 Identity, LGA, GSA
+        self.fusion_weights = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(c1, 3, 1),  # 极小计算量：c1 -> 3
+            nn.Softmax(dim=1)
+        )
 
-        # 4. 最后的输出缩放/调整
+        # 4. 输出投影
         self.cv2 = Conv(c1, c1, 1)
 
     def forward(self, x):
         x_in = self.cv1(x)
 
-        # 并行计算三路特征
-        out_identity = x_in
+        # 并行计算
+        out_id = x_in
         out_lga = self.lga_branch(x_in)
-        out_spa = self.gsa_branch(x_in)
+        out_gsa = self.gsa_branch(x_in)
 
-        # Concat 拼接: [B, 3*C, H, W]
-        combined = torch.cat([out_identity, out_lga, out_spa], dim=1)
+        # 计算融合权重 [B, 3, 1, 1]
+        # 注意：这里我们基于输入 x_in 来决定三路的权重分配
+        w = self.fusion_weights(x_in)
 
-        # 通道融合
-        out = self.cv_fusion(combined)
+        # 加权求和融合
+        out = out_id * w[:, 0:1] + out_lga * w[:, 1:2] + out_gsa * w[:, 2:3]
 
-        # 全局残差连接
         return x + self.cv2(out)
