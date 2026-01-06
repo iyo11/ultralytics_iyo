@@ -153,14 +153,14 @@ class yolov11_heatmap:
 
 def get_params():
     params = {
-        'weight': r'C:\Users\IYO\Desktop\fsdownload\train\v11n_LGASDPA_NWPU_300\weights\best.pt',  # 训练出来的权重文件
+        'weight': r'F:\ultralytics-main\models\uf_11\v8\yolov8n_LGASDPA.yaml',  # 训练出来的权重文件
         'cfg': r'F:\ultralytics-main\models\v11\yolov11n_LGASDPA.yaml',  # 训练权重对应的yaml配置文件
         'device': 'cuda:0',
         'method': 'GradCAM',  # GradCAMPlusPlus, GradCAM, XGradCAM , 使用的热力图库文件不同的效果不一样可以多尝试
-        'layer': 'model.model[16]',  # 想要检测的对应层
+        'layer': 'model.model[10]',  # 想要检测的对应层
         'backward_type': 'all',  # class, box, all
-        'conf_threshold': 0.25,  # 0.6  # 置信度阈值，有的时候你的进度条到一半就停止了就是因为没有高于此值的了
-        'ratio': 0.01  # 0.02-0.1
+        'conf_threshold': 0.01,  # 0.6  # 置信度阈值，有的时候你的进度条到一半就停止了就是因为没有高于此值的了
+        'ratio': 0.02  # 0.02-0.1
     }
     return params
 
