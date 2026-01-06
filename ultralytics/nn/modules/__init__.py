@@ -103,6 +103,8 @@ from .transformer import (
     TransformerLayer,
 )
 
+from .moe import OptimizedMOE, OptimizedMOEImproved, MOE, ES_MOE, EfficientSpatialRouterMoE, ModularRouterExpertMoE
+
 __all__ = (
     "AIFI",
     "C1",
@@ -110,6 +112,10 @@ __all__ = (
     "C2PSA",
     "C3",
     "C3TR",
+    "C3k2_Dynamic",
+    "C3k2UltraPro",
+    "C3k2MA",
+    "C3k2MA_Lite",
     "CBAM",
     "CIB",
     "DFL",
@@ -131,6 +137,10 @@ __all__ = (
     "C2fAttn",
     "C2fCIB",
     "C2fPSA",
+    "C2f_LSKA",
+    "WaveC2f",
+    "DyC2f",
+    "A3C2f",
     "C3Ghost",
     "C3k2",
     "C3x",
@@ -180,5 +190,12 @@ __all__ = (
     "YOLOEDetect",
     "YOLOESegment",
     "v10Detect",
+    "OptimizedMOE",
+    "OptimizedMOEImproved",
+    "MOE",
+    "EfficientSpatialRouterMoE",
+    "ModularRouterExpertMoE",
+    "ES_MOE",
     "LGA_SDPA"
 )
+
