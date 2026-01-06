@@ -77,6 +77,7 @@ from ultralytics.nn.modules.iyo11.C2LGA import LGA_SDPA, C2LGA, Light_LGA_SDPA
 from ultralytics.nn.modules.iyo11.C2LGAv2 import C2LGA_V2
 from ultralytics.nn.modules.iyo11.C3LGPSA import C3LGPSA
 from ultralytics.nn.modules.iyo11.MultiScaleAdaptiveWindowAttention import MultiScaleAdaptiveWindowAttention
+from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_RDW_SDPA import Qwen_GatedAttention_RWD
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_SDPA import Qwen_GatedAttention_SDPA
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
@@ -1652,7 +1653,8 @@ def parse_model(d, ch, verbose=True):
             C2LGA_V2,
             C3LGPSA,
             Light_LGA_SDPA,
-            Qwen_GatedAttention_SDPA
+            Qwen_GatedAttention_SDPA,
+            Qwen_GatedAttention_RWD
         }
     )
 
