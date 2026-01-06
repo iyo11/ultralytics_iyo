@@ -13,8 +13,8 @@ if platform.system() == 'Windows':
     cacheTF =  False
 else:
     datasets_path = '../datasets'
-    batch_size = 24
-    workers = 10
+    batch_size = 16
+    workers = 8
     cacheTF =  True
 
 epoch_count = 300

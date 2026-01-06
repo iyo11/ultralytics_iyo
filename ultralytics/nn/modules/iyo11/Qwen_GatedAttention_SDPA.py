@@ -8,8 +8,10 @@ __all__ = ['Qwen_GatedAttention_SDPA']
 
 class Qwen_GatedAttention_SDPA(nn.Module):
     """
-    基于 NeurIPS 2025 最佳论文 (Alibaba Qwen Team) 实现的门控注意力。
-    核心点：在 SDPA 输出后直接施加 Sigmoid 门控。
+    专注改进动态门控逻辑的版本。
+    1. 保持名字不变。
+    2. 采用多头对齐（Head-wise）的动态门控。
+    3. 简单的残差连接，确保梯度直接回传。
     """
 
     def __init__(self, d_model, n_heads=8, reduction_ratio=1):
@@ -19,71 +21,64 @@ class Qwen_GatedAttention_SDPA(nn.Module):
         self.d_head = d_model // n_heads
         self.reduction_ratio = reduction_ratio
 
-        # Q, K, V 投影
+        # Q, K, V 映射
         self.w_q = nn.Linear(d_model, d_model, bias=False)
         self.w_k = nn.Linear(d_model, d_model, bias=False)
         self.w_v = nn.Linear(d_model, d_model, bias=False)
 
-        # 【核心改进】：论文建议的元素级/头级门控
-        # 该线性层用于生成门控分值，直接作用于 SDPA 的输出
+        # 【动态门控核心】：生成与每个 Head 维度一致的门控分值
+        # Qwen 论文建议：门控应当具有足够的表达力来过滤注意力噪声
         self.gate_proj = nn.Linear(d_model, d_model, bias=False)
 
-        # 输出投影
         self.w_o = nn.Linear(d_model, d_model, bias=False)
 
-        # 空间压缩 (针对 YOLO 小图优化)
+        # 空间压缩逻辑
         if reduction_ratio > 1:
-            self.sr = nn.Sequential(
-                nn.Conv2d(d_model, d_model, kernel_size=reduction_ratio, stride=reduction_ratio, groups=d_model),
-                nn.BatchNorm2d(d_model)  # YOLO 体系更适配 BN
-            )
+            self.sr = nn.Conv2d(d_model, d_model, kernel_size=reduction_ratio, stride=reduction_ratio, groups=d_model)
         else:
             self.sr = nn.Identity()
 
         self.ln = nn.LayerNorm(d_model)
 
-        # 可训练的残差系数：确保模块插入 SPPF 后不破坏原有预训练权重
-        self.gamma = nn.Parameter(torch.zeros(1))
-
     def forward(self, x):
         b, c, h, w = x.shape
-        shortcut = x  # 保存残差
+        # 记录原始输入用于残差
+        shortcut = x
 
-        # 展平特征图: [B, C, H, W] -> [B, N, C]
         x_flat = rearrange(x, 'b c h w -> b (h w) c')
         x_norm = self.ln(x_flat)
 
-        # 1. 生成 Q
+        # 1. 生成 Q, K, V (K,V 可选空间压缩)
         q = self.w_q(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
 
-        # 2. 生成 K, V (带空间压缩以适配低算力或 SPPF 后小图)
         if self.reduction_ratio > 1:
             x_spatial = rearrange(self.sr(x), 'b c h w -> b (h w) c')
+            # 这里的 K, V 投影
+            k = self.w_k(x_spatial).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
+            v = self.w_v(x_spatial).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
         else:
-            x_spatial = x_norm
+            k = self.w_k(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
+            v = self.w_v(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
 
-        k = self.w_k(x_spatial).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
-        v = self.w_v(x_spatial).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
+        # 2. SDPA 注意力计算 (4090 优化路径)
+        # y 的形状是 [b, n_heads, seq_len, d_head]
+        y = F.scaled_dot_product_attention(q, k, v)
 
-        # 3. 标准 SDPA (4090 上触发 FlashAttention)
-        # attn_out 形状: [b, n_heads, seq_len, d_head]
-        attn_out = F.scaled_dot_product_attention(q, k, v)
+        # 3. 【核心步骤：动态门控调制】
+        # 这里是动态性的来源：gate 是根据当前输入 x_norm 实时生成的
+        # 将 gate 拆分为多头形状，确保每一个 Head 都能被精准控制
+        gate = self.gate_proj(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
+        gate = torch.sigmoid(gate)
 
-        # 4. 【最佳论文核心实现】：Query-Dependent Gating
-        # 论文指出：在 Softmax(QK^T)V 后乘以 Sigmoid(Gate)
-        # 我们先将注意力输出还原到 d_model 维度
-        attn_out = attn_out.transpose(1, 2).contiguous().view(b, -1, self.d_model)
+        # 逐元素相乘：这实现了 NeurIPS 2025 论文中的 Head-wise 过滤
+        y = y * gate
 
-        # 生成门控信号并应用 Sigmoid
-        # 门控是基于输入特征 x 动态生成的（Query-dependent）
-        gate = torch.sigmoid(self.gate_proj(x_norm))
+        # 4. 合并多头并映射输出
+        y = y.transpose(1, 2).contiguous().view(b, -1, self.d_model)
+        out = self.w_o(y)
 
-        # 门控调制：这里实现了论文中的 Element-wise gating
-        gated_attn = attn_out * gate
-
-        # 5. 输出投影与残差
-        out = self.w_o(gated_attn)
+        # 还原回图像形状
         out = rearrange(out, 'b (h w) c -> b c h w', h=h, w=w)
 
-        # 这里的 gamma 初始化为0，保证了插入 SPPF 后的初始稳定性
-        return shortcut + self.gamma * out
+        # 5. 标准残差相加 (x + out)
+        return shortcut + out
