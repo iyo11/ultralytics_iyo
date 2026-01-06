@@ -96,6 +96,7 @@ from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_SDPA import Qwen_GatedAtte
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
 from ultralytics.nn.modules.v11.DySample import Dy_Sample
+from ultralytics.nn.modules.v11.EUCB import EUCB
 from ultralytics.nn.modules.v11.FeatureFusion import FeatureFusion
 from ultralytics.nn.modules.v11.GatedAttention import C3k2_GatedAttention, GatedAttention
 from ultralytics.nn.modules.v11.GatedC2PSA import GatedC2PSA
@@ -1782,7 +1783,7 @@ def parse_model(d, ch, verbose=True):
 
             # 不要做 make_divisible(width) 也不要 insert repeats 到 args
             # repeats 由外层 Sequential 处理
-        elif m in {Dy_Sample}:
+        elif m in {Dy_Sample, EUCB}:
             c2 = ch[f]
             args = [c2, *args]
 
