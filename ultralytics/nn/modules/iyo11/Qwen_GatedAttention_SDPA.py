@@ -8,10 +8,10 @@ __all__ = ['Qwen_GatedAttention_SDPA']
 
 class Qwen_GatedAttention_SDPA(nn.Module):
     """
-    专注改进动态门控逻辑的版本。
-    1. 保持名字不变。
-    2. 采用多头对齐（Head-wise）的动态门控。
-    3. 简单的残差连接，确保梯度直接回传。
+    Qwen 门控注意力的视觉进化版：
+    1. 门控升级：从 Linear 改为 3x3 DWConv，引入局部空间上下文。
+    2. 保持 SDPA：适配 4090 的高效注意力计算。
+    3. 负偏置初始化：抑制背景噪声，提高训练稳定性。
     """
 
     def __init__(self, d_model, n_heads=8, reduction_ratio=1):
@@ -26,9 +26,9 @@ class Qwen_GatedAttention_SDPA(nn.Module):
         self.w_k = nn.Linear(d_model, d_model, bias=False)
         self.w_v = nn.Linear(d_model, d_model, bias=False)
 
-        # 【动态门控核心】：生成与每个 Head 维度一致的门控分值
-        # Qwen 论文建议：门控应当具有足够的表达力来过滤注意力噪声
-        self.gate_proj = nn.Linear(d_model, d_model, bias=False)
+        # 【核心改进】：空间感知门控 (Spatial-Aware Gate)
+        # 使用 groups=d_model (DWConv) 可以在不显著增加参数量的情况下，获得 3x3 的感受野
+        self.gate_proj = nn.Conv2d(d_model, d_model, kernel_size=3, padding=1, groups=d_model, bias=True)
 
         self.w_o = nn.Linear(d_model, d_model, bias=False)
 
@@ -40,45 +40,55 @@ class Qwen_GatedAttention_SDPA(nn.Module):
 
         self.ln = nn.LayerNorm(d_model)
 
+        # 执行权重初始化
+        self._init_weights()
+
+    def _init_weights(self):
+        # 延续 Qwen 建议：门控偏置负初始化，默认让门处于“微闭”状态，过滤背景
+        if self.gate_proj.bias is not None:
+            nn.init.constant_(self.gate_proj.bias, -1.0)
+
     def forward(self, x):
         b, c, h, w = x.shape
-        # 记录原始输入用于残差
         shortcut = x
 
+        # 准备进入注意力层
         x_flat = rearrange(x, 'b c h w -> b (h w) c')
         x_norm = self.ln(x_flat)
 
-        # 1. 生成 Q, K, V (K,V 可选空间压缩)
+        # 1. 生成 Q, K, V
         q = self.w_q(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
 
         if self.reduction_ratio > 1:
             x_spatial = rearrange(self.sr(x), 'b c h w -> b (h w) c')
-            # 这里的 K, V 投影
             k = self.w_k(x_spatial).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
             v = self.w_v(x_spatial).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
         else:
             k = self.w_k(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
             v = self.w_v(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
 
-        # 2. SDPA 注意力计算 (4090 优化路径)
-        # y 的形状是 [b, n_heads, seq_len, d_head]
+        # 2. SDPA 高效计算
         y = F.scaled_dot_product_attention(q, k, v)
 
-        # 3. 【核心步骤：动态门控调制】
-        # 这里是动态性的来源：gate 是根据当前输入 x_norm 实时生成的
-        # 将 gate 拆分为多头形状，确保每一个 Head 都能被精准控制
-        gate = self.gate_proj(x_norm).view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
+        # 3. 【空间感知门控调制】
+        # 将 x_norm 还原为 4D 形状进行卷积，从而让门控能“看周围”
+        # 这里用 x_norm 而不是 x，是为了保证门控信号是经过归一化的，训练更稳
+        gate_input = rearrange(x_norm, 'b (h w) c -> b c h w', h=h, w=w)
+        gate = self.gate_proj(gate_input)
+
+        # 变回注意力形状：[b, n_heads, seq_len, d_head]
+        gate = rearrange(gate, 'b c h w -> b (h w) c')
+        gate = gate.view(b, -1, self.n_heads, self.d_head).transpose(1, 2)
         gate = torch.sigmoid(gate)
 
-        # 逐元素相乘：这实现了 NeurIPS 2025 论文中的 Head-wise 过滤
+        # 逐元素相乘
         y = y * gate
 
-        # 4. 合并多头并映射输出
+        # 4. 合并输出
         y = y.transpose(1, 2).contiguous().view(b, -1, self.d_model)
         out = self.w_o(y)
 
-        # 还原回图像形状
+        # 还原形状
         out = rearrange(out, 'b (h w) c -> b c h w', h=h, w=w)
 
-        # 5. 标准残差相加 (x + out)
         return shortcut + out
