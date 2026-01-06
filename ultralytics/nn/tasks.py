@@ -1782,7 +1782,9 @@ def parse_model(d, ch, verbose=True):
 
             # 不要做 make_divisible(width) 也不要 insert repeats 到 args
             # repeats 由外层 Sequential 处理
-
+        elif m in {Dy_Sample}:
+            c2 = ch[f]
+            args = [c2, *args]
 
         elif m in base_modules:
             # ---------------- FeatureFusion (two-input) special case ----------------
@@ -1813,9 +1815,6 @@ def parse_model(d, ch, verbose=True):
 
                 # IMPORTANT: do NOT transform args to [c1, c2, ...] for FeatureFusion.
                 # It expects (dim, ...) not (c1, c2, ...)
-            elif m in {Dy_Sample}:
-                c2 = ch[f]
-                args = [c2, *args]
 
             elif m in {EFC, MSEF}:
                 # EFC/MSEF: two-input modules
