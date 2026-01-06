@@ -94,6 +94,7 @@ from ultralytics.nn.modules.iyo11.MultiScaleAdaptiveWindowAttention import Multi
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_RDW_SDPA import Qwen_GatedAttention_RWD
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_SDPA import Qwen_GatedAttention_SDPA
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
+from ultralytics.nn.modules.v11.BFAM import C3k2_BFAM_1, C3k2_BFAM_2
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
 from ultralytics.nn.modules.v11.DySample import Dy_Sample
 from ultralytics.nn.modules.v11.EUCB import EUCB
@@ -1685,7 +1686,9 @@ def parse_model(d, ch, verbose=True):
             C3k2MA_Lite,
             ES_MOE,
             ScConv,
-            C3k2_ScConv
+            C3k2_ScConv,
+            C3k2_BFAM_1,
+            C3k2_BFAM_2,
         }
     )
 
@@ -1752,7 +1755,9 @@ def parse_model(d, ch, verbose=True):
             C3k2MA_Lite,
             ScConv,
             C3k2_ScConv,
-            Dy_Sample
+            Dy_Sample,
+            C3k2_BFAM_1,
+            C3k2_BFAM_2,
         }
     )
 
