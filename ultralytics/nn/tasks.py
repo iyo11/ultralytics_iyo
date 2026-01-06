@@ -95,6 +95,7 @@ from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_RDW_SDPA import Qwen_Gated
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_SDPA import Qwen_GatedAttention_SDPA
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
+from ultralytics.nn.modules.v11.DySample import Dy_Sample
 from ultralytics.nn.modules.v11.FeatureFusion import FeatureFusion
 from ultralytics.nn.modules.v11.GatedAttention import C3k2_GatedAttention, GatedAttention
 from ultralytics.nn.modules.v11.GatedC2PSA import GatedC2PSA
@@ -1749,7 +1750,8 @@ def parse_model(d, ch, verbose=True):
             C3k2MA,
             C3k2MA_Lite,
             ScConv,
-            C3k2_ScConv
+            C3k2_ScConv,
+            Dy_Sample
         }
     )
 
@@ -1811,6 +1813,9 @@ def parse_model(d, ch, verbose=True):
 
                 # IMPORTANT: do NOT transform args to [c1, c2, ...] for FeatureFusion.
                 # It expects (dim, ...) not (c1, c2, ...)
+            elif m in {Dy_Sample}:
+                c2 = ch[f]
+                args = [c2, *args]
 
             elif m in {EFC, MSEF}:
                 # EFC/MSEF: two-input modules
