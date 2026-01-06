@@ -1668,7 +1668,19 @@ def parse_model(d, ch, verbose=True):
             C3LGPSA,
             Light_LGA_SDPA,
             Qwen_GatedAttention_SDPA,
-            Qwen_GatedAttention_RWD
+            Qwen_GatedAttention_RWD,
+            OptimizedMOE,
+            OptimizedMOEImproved,
+            C3k2_Dynamic,
+            C2f_LSKA,
+            MOE,
+            WaveC2f,
+            DyC2f,
+            A3C2f,
+            C3k2UltraPro,
+            C3k2MA,
+            C3k2MA_Lite,
+            ES_MOE,
         }
     )
 
