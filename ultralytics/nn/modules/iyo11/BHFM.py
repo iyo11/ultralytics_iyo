@@ -4,7 +4,7 @@ import torch.nn as nn
 
 class ChannelAttention(nn.Module):
     """
-    右侧分支：通道注意力机制 (保持不变)
+    通道注意力机制 (保持不变)
     """
 
     def __init__(self, channels, reduction=16):
@@ -24,108 +24,119 @@ class ChannelAttention(nn.Module):
         return x * y
 
 
-class ConcatAddFusion(nn.Module):
+class BasicConv(nn.Module):
     """
-    对应黄色流程图 (image_7789c6.png)
-    也就是绿色图中 'C+' 节点的具体实现
+    基础卷积块：Conv + BN + SiLU
+    完全替换之前的 OrthoConv，使用普通卷积 (groups=1)
+    """
 
-    流程:
-    1. Concat(原始特征A, 处理后特征B) -> 2C
-    2. Conv 1x1 -> C
-    3. Add(结果, 原始特征A)
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, dilation=1):
+        super().__init__()
+        # 计算 padding 以保持特征图尺寸不变
+        # Padding = (Kernel_size - 1) * dilation / 2
+        padding = ((kernel_size - 1) * dilation) // 2
+
+        self.conv = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            bias=False  # 有BN通常不需要bias
+        )
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
+
+
+class FusionModule(nn.Module):
+    """
+    融合模块：Concat -> Conv1x1 -> BN -> SiLU
+    用于融合 原始特征(A) 和 处理后特征(B)
     """
 
     def __init__(self, c):
         super().__init__()
-        # 输入是 2C (A+B), 输出是 C
-        self.conv1x1 = nn.Conv2d(c * 2, c, kernel_size=1, stride=1, padding=0)
-        self.act = nn.ReLU(inplace=True)  # 通常Conv后会接激活，图中未明确画出，如不需要可注释掉
+        # 输入是 A(c) + B(c) = 2c -> 输出 c
+        self.fusion_conv = nn.Conv2d(c * 2, c, kernel_size=1, bias=False)
+        self.bn = nn.BatchNorm2d(c)
+        self.act = nn.SiLU(inplace=True)
 
     def forward(self, x_orig, x_processed):
-        # x_orig: 原始特征 A (图中下方的输入)
-        # x_processed: 处理后特征 B (图中上方的输入)
-
-        # 1. Concat
+        # Concat
         cat_feat = torch.cat([x_processed, x_orig], dim=1)
-
-        # 2. Conv 1x1
-        out = self.conv1x1(cat_feat)
-        # out = self.act(out) # 可选: 激活函数
-
-        # 3. Add (Residual connection with Original Feature A)
-        return out + x_orig
+        # 融合 + 降维
+        return self.act(self.bn(self.fusion_conv(cat_feat)))
 
 
 class BHFM(nn.Module):
     """
-    Bio-inspired Hierarchical Feature Modulation (BHFM)
-    已更新: 'C+' 节点使用 ConcatAddFusion 模块
+    BHFM 改良版：使用普通卷积 (Standard Convolution)
     """
 
     def __init__(self, c1, c2):
         super().__init__()
-        # 假设 c1 == c2，如果不同建议先在外部用 1x1 统一
-        c = c1
+        # 假设输入输出通道一致，如果需要在YOLO yaml中使用，通常 c1 != c2 时需要处理
+        # 这里为了模块内部稳定性，统一映射到 c2
+        self.input_proj = None
+        if c1 != c2:
+            self.input_proj = nn.Conv2d(c1, c2, 1, bias=False)
 
-        # === 1. 特征提取分支 ===
+        c = c2
 
-        # 第一层：3x3 正交卷积
-        self.ortho_conv3 = nn.Sequential(
-            nn.Conv2d(c, c, kernel_size=(1, 3), padding=(0, 1), groups=c),
-            nn.Conv2d(c, c, kernel_size=(3, 1), padding=(1, 0), groups=c)
+        # === 1. 特征提取分支 (改为普通卷积) ===
+
+        # Step 1: 标准 3x3 卷积
+        self.conv3 = BasicConv(c, c, kernel_size=3, dilation=1)
+        self.fusion1 = FusionModule(c)
+
+        # Step 2: 标准 3x3 膨胀卷积 (Dilation=2, 感受野类比 5x5)
+        self.conv5 = BasicConv(c, c, kernel_size=3, dilation=2)
+        self.fusion2 = FusionModule(c)
+
+        # === 2. 聚合与注意力 ===
+
+        # 最终整合特征的 1x1 卷积
+        self.final_conv = nn.Sequential(
+            nn.Conv2d(c, c, 1, bias=False),
+            nn.BatchNorm2d(c),
+            nn.SiLU(inplace=True)
         )
-        # 第一个 C+ 融合模块
-        self.fusion1 = ConcatAddFusion(c)
 
-        # 第二层：19x19 正交卷积
-        self.ortho_conv5_equivalent = nn.Sequential(
-            # 1x3, dilation=2 -> Padding = 2
-            nn.Conv2d(c, c, kernel_size=(1, 3), padding=(0, 2), dilation=2, groups=c),
-            nn.Conv2d(c, c, kernel_size=(3, 1), padding=(2, 0), dilation=2, groups=c)
-        )
-        # 第二个 C+ 融合模块
-        self.fusion2 = ConcatAddFusion(c)
-
-        # === 2. 混合与注意力分支 ===
-        self.mid_conv1x1 = nn.Conv2d(c, c, 1)
+        # 通道注意力
         self.channel_attn = ChannelAttention(c)
-        self.norm = nn.BatchNorm2d(c)
 
     def forward(self, x):
-        # x: Input
+        # 通道对齐
+        if self.input_proj is not None:
+            x = self.input_proj(x)
 
         # --- 阶梯式处理流程 ---
 
         # Step 1: 3x3 分支
-        feat3 = self.ortho_conv3(x)  # 处理后特征 B
-        # C+ 融合: 输入是 x (原始A) 和 feat5 (处理B)
+        feat3 = self.conv3(x)
+        # 融合: 输入 x 和 feat3
         node_1 = self.fusion1(x_orig=x, x_processed=feat3)
 
-        # Step 2: 5x5 分支
-        feat5 = self.ortho_conv5_equivalent(node_1)  # 处理后特征 B
-        # C+ 融合: 输入是 node_1 (作为这一级的原始A) 和 feat19 (处理B)
+        # Step 2: 5x5 (dilation) 分支
+        # 注意：这里输入是上一级的输出 node_1
+        feat5 = self.conv5(node_1)
+        # 融合: 输入 node_1 和 feat5
         node_2 = self.fusion2(x_orig=node_1, x_processed=feat5)
 
-        # --- 全局融合 (参考绿色图结构) ---
+        # --- 输出阶段 ---
 
-        # 1. 乘法交互: Input * 最后一级融合特征
-        merged_mul = x * node_2
+        # 1. 整理特征
+        refined_feat = self.final_conv(node_2)
 
-        # 2. Conv 1x1 变换
-        conv_out = self.mid_conv1x1(merged_mul)
+        # 2. 计算注意力权重
+        attn_out = self.channel_attn(refined_feat)
 
-        # 3. 加法融合: Input + Conv结果
-        merged_add = x + conv_out
-
-        # --- 注意力与输出 ---
-
-        # 计算注意力权重
-        attn_out = self.channel_attn(x)
-
-        # 最终乘法: 混合特征 * 注意力
-        final_interaction = merged_add * attn_out
-
-        # Norm + 残差
-        out = self.norm(final_interaction) + x
+        # 3. 最终残差 (Scale + Add)
+        # 使用注意力加权后的特征 + 原始输入
+        out = x + (refined_feat * attn_out)
 
         return out
