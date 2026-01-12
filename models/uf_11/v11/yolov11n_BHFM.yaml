@@ -1,0 +1,43 @@
+nc: 80
+scales:
+  n: [0.50,0.25,1024]
+
+backbone:
+  - [-1,1,Conv,[64,3,2]]                                 # 0
+  - [-1,1,Conv,[128,3,2]]                                # 1
+  - [-1,2,C3k2,[256,False,0.25]]                         # 2   p2
+  - [-1,1,Conv,[256,3,2]]                                # 3
+  - [-1,2,C3k2,[512,False,0.25]]                         # 4   p3
+  - [-1,1,Conv,[512,3,2]]                                # 5
+  - [-1,2,C3k2,[512,True]]                               # 6   p4
+  - [-1,1,Conv,[1024,3,2]]                               # 7
+  - [-1,2,C3k2,[1024,True]]                              # 8
+  - [-1,1,SPPF,[1024,5]]                                 # 9
+  - [-1,2,C2PSA,[1024]]                                  # 10  p5
+
+head:
+  # === 插入的 BHFM 模块 (索引 11, 12, 13) ===
+  - [ 4, 1, BHFM, [ 512 ] ]                              # 11  (P3 processed)
+  - [ 6, 1, BHFM, [ 512 ] ]                              # 12  (P4 processed)
+  - [ 10, 1, BHFM, [ 1024 ] ]                            # 13  (P5 processed)
+
+  # === FPN Upsample (自顶向下) ===
+  - [-1,1,nn.Upsample,[None,2,"nearest"]]                # 14  (Input: 13)
+  - [[-1,12],1,Concat,[1]]                               # 15  (Cat with 12-P4)
+  - [-1,2,C3k2,[512,False]]                              # 16
+
+  - [-1,1,nn.Upsample,[None,2,"nearest"]]                # 17
+  - [[-1,11],1,Concat,[1]]                               # 18  (Cat with 11-P3)
+  - [-1,2,C3k2,[256,False]]                              # 19  (Output P3)
+
+  # === PAN Downsample (自底向上) ===
+  - [-1,1,Conv,[256,3,2]]                                # 20
+  - [[-1,16],1,Concat,[1]]                               # 21  (Cat with 16)
+  - [-1,2,C3k2,[512,False]]                              # 22  (Output P4)
+
+  - [-1,1,Conv,[512,3,2]]                                # 23
+  - [[-1,13],1,Concat,[1]]                               # 24  (Cat with 13-P5)
+  - [-1,2,C3k2,[1024,True]]                              # 25  (Output P5)
+
+  # === Detect ===
+  - [[19,22,25],1,Detect,[nc]]                           # 26

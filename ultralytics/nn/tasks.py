@@ -87,6 +87,7 @@ from ultralytics.nn.modules.backbone.PoolFormer import PoolFormerBlock
 from ultralytics.nn.modules.backbone.PoolFormerMSConvV2 import PoolFormerMSConvBlockV2
 from ultralytics.nn.modules.backbone.PoolFormerMSConvV3 import PoolFormerMSConvBlockV3
 from ultralytics.nn.modules.backbone.PoolFormerMsConv import PoolFormerMSConvBlock
+from ultralytics.nn.modules.iyo11.BHFM import BHFM
 from ultralytics.nn.modules.iyo11.C2LGA import LGA_SDPA, C2LGA, Light_LGA_SDPA
 from ultralytics.nn.modules.iyo11.C2LGAv2 import C2LGA_V2
 from ultralytics.nn.modules.iyo11.C3LGPSA import C3LGPSA
@@ -1689,6 +1690,7 @@ def parse_model(d, ch, verbose=True):
             C3k2_ScConv,
             C3k2_BFAM_1,
             C3k2_BFAM_2,
+            BHFM
         }
     )
 
