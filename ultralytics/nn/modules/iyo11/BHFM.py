@@ -62,25 +62,26 @@ class BHFM(nn.Module):
     已更新: 'C+' 节点使用 ConcatAddFusion 模块
     """
 
-    def __init__(self, c1, c2, kernel_size=5, dilation=3):
+    def __init__(self, c1, c2):
         super().__init__()
         # 假设 c1 == c2，如果不同建议先在外部用 1x1 统一
         c = c1
 
         # === 1. 特征提取分支 ===
 
-        # 第一层：5x5 正交卷积
-        self.ortho_conv5 = nn.Sequential(
-            nn.Conv2d(c, c, kernel_size=(1, 5), padding=(0, 2), groups=c),
-            nn.Conv2d(c, c, kernel_size=(5, 1), padding=(2, 0), groups=c)
+        # 第一层：3x3 正交卷积
+        self.ortho_conv3 = nn.Sequential(
+            nn.Conv2d(c, c, kernel_size=(1, 3), padding=(0, 1), groups=c),
+            nn.Conv2d(c, c, kernel_size=(3, 1), padding=(1, 0), groups=c)
         )
         # 第一个 C+ 融合模块
         self.fusion1 = ConcatAddFusion(c)
 
         # 第二层：19x19 正交卷积
-        self.ortho_conv19 = nn.Sequential(
-            nn.Conv2d(c, c, kernel_size=(1, 7), padding=(0, 9), dilation=3, groups=c),
-            nn.Conv2d(c, c, kernel_size=(7, 1), padding=(9, 0), dilation=3, groups=c)
+        self.ortho_conv5_equivalent = nn.Sequential(
+            # 1x3, dilation=2 -> Padding = 2
+            nn.Conv2d(c, c, kernel_size=(1, 3), padding=(0, 2), dilation=2, groups=c),
+            nn.Conv2d(c, c, kernel_size=(3, 1), padding=(2, 0), dilation=2, groups=c)
         )
         # 第二个 C+ 融合模块
         self.fusion2 = ConcatAddFusion(c)
@@ -95,15 +96,15 @@ class BHFM(nn.Module):
 
         # --- 阶梯式处理流程 ---
 
-        # Step 1: 5x5 分支
-        feat5 = self.ortho_conv5(x)  # 处理后特征 B
+        # Step 1: 3x3 分支
+        feat3 = self.ortho_conv3(x)  # 处理后特征 B
         # C+ 融合: 输入是 x (原始A) 和 feat5 (处理B)
-        node_1 = self.fusion1(x_orig=x, x_processed=feat5)
+        node_1 = self.fusion1(x_orig=x, x_processed=feat3)
 
-        # Step 2: 19x19 分支
-        feat19 = self.ortho_conv19(node_1)  # 处理后特征 B
+        # Step 2: 5x5 分支
+        feat5 = self.ortho_conv5_equivalent(node_1)  # 处理后特征 B
         # C+ 融合: 输入是 node_1 (作为这一级的原始A) 和 feat19 (处理B)
-        node_2 = self.fusion2(x_orig=node_1, x_processed=feat19)
+        node_2 = self.fusion2(x_orig=node_1, x_processed=feat5)
 
         # --- 全局融合 (参考绿色图结构) ---
 
