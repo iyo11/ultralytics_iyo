@@ -32,7 +32,9 @@ class ParameterFreeChannelAttention(nn.Module):
         # 使用全局平均池化 (GAP) 捕捉全局背景
         avg_out = torch.mean(x, dim=(2, 3), keepdim=True)
         # 使用全局最大池化 (GMP) 捕捉显著特征 (可选，增加鲁棒性)
-        max_out, _ = torch.max(x, dim=(2, 3), keepdim=True)
+        # 先算维度 2 的最大值，再算维度 3 的最大值
+        max_out = torch.max(x, dim=2, keepdim=True)[0]
+        max_out = torch.max(max_out, dim=3, keepdim=True)[0]
 
         # 融合两者（或只选其一）并通过 Sigmoid 归一化到 0-1
         # 这里采用均值和最大值的均值，能够更全面地反映通道重要性
