@@ -1,3 +1,36 @@
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+#
+#
+# class StableDSU(nn.Module):
+#     def __init__(self, c1, c2, scale=2):
+#         super().__init__()
+#         self.scale = scale
+#
+#         self.semantic_path = nn.Sequential(
+#             nn.Upsample(scale_factor=scale, mode='bilinear', align_corners=False),
+#             nn.Conv2d(c1, c2, 1, bias=False)
+#         )
+#
+#         self.detail_gate = nn.Sequential(
+#             nn.Conv2d(c1, c1, 3, padding=1, groups=c1, bias=False),
+#             nn.BatchNorm2d(c1),
+#             nn.SiLU(),
+#             nn.Conv2d(c1, c2, 1, bias=False),
+#             nn.Upsample(scale_factor=scale, mode='bilinear', align_corners=False),
+#             nn.Sigmoid()
+#         )
+#
+#         self.refine = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+#
+#     def forward(self, x):
+#         base_feat = self.semantic_path(x)
+#         detail_mask = self.detail_gate(x)
+#         out = base_feat * (1 + detail_mask)
+#         return self.refine(out)
+
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,46 +38,50 @@ import torch.nn.functional as F
 
 class StableDSU(nn.Module):
     """
-    Stable Dynamic Semantic Upsampler (Stable-DSU)
-    借鉴 DySample 思想，但去除了非确定性的 grid_sample。
-    采用内容感知门控机制，确保在固定种子下 100% 可复现。
+    Improved StableDSU:
+    - centered gate (tanh) allows both enhance & suppress
+    - learnable gamma (zero-init) for stable start
+    - GroupNorm instead of BatchNorm for small-batch stability
+    - refine: DWConv + PWConv for spatial + channel mixing
     """
-
-    def __init__(self, in_channels, out_channels, scale=2):
+    def __init__(self, c1, c2, scale=2, gn_groups=32):
         super().__init__()
         self.scale = scale
-        self.in_channels = in_channels
-        self.out_channels = out_channels
 
-        # 1. 语义路径：保持全局语义稳定
+        # --- semantic path: upsample -> 1x1 project ---
         self.semantic_path = nn.Sequential(
             nn.Upsample(scale_factor=scale, mode='bilinear', align_corners=False),
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+            nn.Conv2d(c1, c2, kernel_size=1, bias=False)
         )
 
-        # 2. 动态细节路径：学习边缘和细节的增强
-        # 使用 Depthwise 卷积减少参数，同时捕捉局部特征
+        # choose a valid GN group count
+        g = min(gn_groups, c1)
+        while c1 % g != 0 and g > 1:
+            g -= 1
+        self.norm = nn.GroupNorm(g, c1)
+
+        # --- detail gate: DWConv -> GN -> act -> 1x1 -> upsample -> tanh ---
         self.detail_gate = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels, bias=False),
-            nn.BatchNorm2d(in_channels),
+            nn.Conv2d(c1, c1, kernel_size=3, padding=1, groups=c1, bias=False),
+            self.norm,
             nn.SiLU(),
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+            nn.Conv2d(c1, c2, kernel_size=1, bias=True),  # bias helps gate shift
             nn.Upsample(scale_factor=scale, mode='bilinear', align_corners=False),
-            nn.Sigmoid()  # 输出 0-1 之间的权重系数
+            nn.Tanh()
         )
 
-        # 3. 特征细化
-        self.refine = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, groups=out_channels, bias=False)
+        # learnable scale, start from 0 => near identity at init
+        self.gamma = nn.Parameter(torch.zeros(1))
+
+        # --- refine: DWConv + PWConv (adds channel mixing) ---
+        self.refine = nn.Sequential(
+            nn.Conv2d(c2, c2, kernel_size=3, padding=1, groups=c2, bias=False),
+            nn.SiLU(),
+            nn.Conv2d(c2, c2, kernel_size=1, bias=False)
+        )
 
     def forward(self, x):
-        # 基础语义特征
-        base_feat = self.semantic_path(x)
-
-        # 生成内容自适应权重（类似 DySample 的采样意图，但以权重形式体现）
-        detail_mask = self.detail_gate(x)
-
-        # 动态融合：基础特征 * 权重增强
-        # 这样做可以确保：如果模型学不到东西，detail_mask 趋近 0.5，退化为普通上采样，非常稳定
-        out = base_feat * (1 + detail_mask)
-
+        base_feat = self.semantic_path(x)         # (B, c2, H*scale, W*scale)
+        gate = self.detail_gate(x)               # tanh -> [-1, 1]
+        out = base_feat * (1.0 + self.gamma * gate)
         return self.refine(out)
