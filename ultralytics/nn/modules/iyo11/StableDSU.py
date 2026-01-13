@@ -134,120 +134,47 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-def _make_gn(c, max_groups=32):
-    # 让 Group 数能整除通道数；常见 c2=64/128/256 都没问题
+def make_gn(c, max_groups=32):
     g = min(max_groups, c)
     while c % g != 0 and g > 1:
         g -= 1
     return nn.GroupNorm(g, c)
 
-
 class StableDSU(nn.Module):
-    """
-    StableDSU vBest (small-object & cross-dataset friendly)
-
-    Core ideas:
-    - GN instead of BN for small-batch + domain shift stability
-    - multi-scale depthwise gating (local + dilated context)
-    - strong regularized gate: 1-channel spatial mask (anti-overfit)
-    - multiplicative gate in (0,2): y = x * (2*sigmoid(mask_logits))
-      -> can both suppress & enhance (unlike 1+sigmoid)
-    - refine residual strength controlled by sigmoid(alpha) (stable yet learnable)
-    - upsample option: pixelshuffle-lite (default) or bilinear
-
-    Args:
-        c1: input channels
-        c2: output channels
-        scale: upsample factor (2 usually)
-        upsample: "ps" (pixelshuffle-lite) or "bilinear"
-        gate_channels: 1 for most stable; can set 8/16 for stronger gate if needed
-        gn_groups: max GN groups (auto-adjusted to divide channels)
-    """
-    def __init__(
-        self,
-        c1: int,
-        c2: int,
-        scale: int = 2,
-        upsample: str = "ps",
-        gate_channels: int = 1,
-        gn_groups: int = 32,
-    ):
+    def __init__(self, c1, c2, scale=2, use_gn=True):
         super().__init__()
-        assert upsample in ("ps", "bilinear")
-        assert scale in (2, 4), "scale usually 2 (or 4)."
-
         self.scale = scale
-        self.upsample_mode = upsample
-
-        # 1) compress + norm + act
         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
-        self.norm1 = _make_gn(c2, gn_groups)
-        self.act = nn.SiLU()
 
-        # 2) multi-scale depthwise gating trunk
-        self.gate_local = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
-        self.gate_context = nn.Conv2d(c2, c2, 3, padding=2, dilation=2, groups=c2, bias=False)
+        Norm = (lambda c: make_gn(c)) if use_gn else (lambda c: nn.BatchNorm2d(c))
 
-        # gate fusion -> produce low-dim spatial mask (default 1 channel)
-        # using a small bottleneck to stabilize + avoid overfit
-        hidden = max(8, c2 // 8)
-        self.gate_fuse = nn.Sequential(
-            nn.Conv2d(c2, hidden, 1, bias=False),
-            _make_gn(hidden, gn_groups),
-            nn.SiLU(),
-            nn.Conv2d(hidden, gate_channels, 1, bias=True)  # logits
-        )
-
-        # 3) upsample head
-        if self.upsample_mode == "ps":
-            # pixelshuffle-lite: (c2 -> c2*scale^2) then PixelShuffle
-            self.up_proj = nn.Conv2d(c2, c2 * (scale ** 2), 1, bias=False)
-            self.up_norm = _make_gn(c2 * (scale ** 2), gn_groups)
-            self.up_act = nn.SiLU()
-            self.ps = nn.PixelShuffle(scale)
-        else:
-            self.up_proj = None
-
-        # 4) refine block (DW + PW) with controlled residual strength
-        self.refine = nn.Sequential(
+        # gate in low-res (keep E1 spirit)
+        self.gate_conv = nn.Sequential(
             nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
-            nn.Conv2d(c2, c2, 1, bias=False),
-            _make_gn(c2, gn_groups),
+            Norm(c2),
             nn.SiLU(),
+            nn.Conv2d(c2, c2, 1, bias=True),   # keep bias
+            nn.Sigmoid()
         )
-        # alpha init: sigmoid(-2) ~ 0.12, "weak but not zero" at start
-        self.alpha = nn.Parameter(torch.tensor(-2.0))
 
-        # ---- init: keep it stable ----
-        # make gate logits start near 0 => sigmoid ~ 0.5 => gate ~ 1.0 (neutral)
-        nn.init.zeros_(self.gate_fuse[-1].bias)
+        # refine: keep DWConv but make it residual+controllable
+        self.refine = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+        self.alpha = nn.Parameter(torch.tensor(-2.0))  # sigmoid(-2)≈0.12
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # compress
-        x_low = self.act(self.norm1(self.compress(x)))
+        # init: make gate start neutral (sigmoid bias ~ 0 => 0.5)
+        nn.init.zeros_(self.gate_conv[-2].bias)
 
-        # multi-scale gating features
-        g = self.gate_local(x_low) + self.gate_context(x_low)
-        logits = self.gate_fuse(g)  # (B, gate_channels, H, W)
+    def forward(self, x):
+        x_low = self.compress(x)
 
-        # multiplicative gate in (0,2): suppress/enhance
-        gate = 2.0 * torch.sigmoid(logits)
+        mask = self.gate_conv(x_low)     # (0,1)
 
-        # if gate is low-dim (e.g., 1 channel), broadcast to c2
-        if gate.shape[1] != x_low.shape[1]:
-            gate = gate.expand(-1, x_low.shape[1], -1, -1)
-
+        # KEY: allow suppress/enhance, starts neutral at ~1
+        gate = 2.0 * mask                # (0,2)
         out_low = x_low * gate
 
-        # upsample
-        if self.upsample_mode == "ps":
-            u = self.up_act(self.up_norm(self.up_proj(out_low)))
-            out = self.ps(u)
-        else:
-            out = F.interpolate(out_low, scale_factor=self.scale, mode="bilinear", align_corners=False)
+        out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
 
-        # controlled residual refine
-        w = torch.sigmoid(self.alpha)  # (0,1)
+        w = torch.sigmoid(self.alpha)    # (0,1)
         out = out + w * self.refine(out)
         return out
