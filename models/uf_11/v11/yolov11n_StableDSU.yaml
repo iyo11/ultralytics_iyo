@@ -16,7 +16,7 @@ backbone:
   - [-1,2,C2PSA,[1024]]                                  # 10
 
 head:
-  - [-1,1,StableDSU, [2]]                                # 11
+  - [-1,1,nn.Upsample,[None,2,"nearest"]]                # 11
   - [[-1,6],1,Concat,[1]]                                # 12
   - [-1,2,C3k2,[512,False]]                              # 13
 
