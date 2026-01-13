@@ -84,93 +84,44 @@ import torch.nn.functional as F
 
 class StableDSU(nn.Module):
     """
-    StableDSU（版本 B：更通用、更保守）
-
-    设计目标：
-    1. 模块初始行为接近恒等映射（zero-init），避免跨数据集性能退化
-    2. 在低分辨率特征上生成门控，降低计算量
-    3. 门控为“中心化”调制（可增强也可抑制特征）
+    Version B (更实用的保守版):
+    - gamma_gate = 0.05 近 0-init：既稳又容易学出收益
+    - gate 用 sigmoid 并中心化：梯度更友好
+    - refine 继续 0-init：避免 RSOD 被细化卷积伤到
     """
-
-    def __init__(self, c1, c2, scale=2):
+    def __init__(self, c1, c2, scale=2, gn=False):
         super().__init__()
         self.scale = scale
 
-        # ---------------------------------------------------
-        # 1. 通道压缩（通常 c1 > c2）
-        #    作用：
-        #    - 对齐通道数，便于后续融合
-        #    - 降低后续门控和卷积的计算量
-        # ---------------------------------------------------
-        self.compress = nn.Conv2d(c1, c2, kernel_size=1, bias=False)
+        self.compress = nn.Conv2d(c1, c2, 1, bias=False)
 
-        # ---------------------------------------------------
-        # 2. 低分辨率门控分支（Lightweight Gate）
-        #    特点：
-        #    - 深度可分离卷积（groups=c2），计算开销小
-        #    - 在低分辨率下工作，进一步省算力
-        #    - Tanh 输出在 [-1, 1]，是“中心化门控”
-        #      可对特征进行增强或抑制
-        # ---------------------------------------------------
+        Norm = (lambda c: nn.GroupNorm(32, c)) if gn else (lambda c: nn.BatchNorm2d(c))
+
         self.gate_conv = nn.Sequential(
-            nn.Conv2d(c2, c2, kernel_size=3, padding=1, groups=c2, bias=False),
-            nn.BatchNorm2d(c2),
+            nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
+            Norm(c2),
             nn.SiLU(),
-            nn.Conv2d(c2, c2, kernel_size=1, bias=True),
-            nn.Tanh()
+            nn.Conv2d(c2, c2, 1, bias=True),
+            nn.Sigmoid()
         )
 
-        # ---------------------------------------------------
-        # 3. 上采样后的轻量细化卷积
-        #    - 深度卷积，仅做空间细化
-        #    - 不改变通道数
-        # ---------------------------------------------------
-        self.refine = nn.Conv2d(
-            c2, c2, kernel_size=3, padding=1, groups=c2, bias=False
-        )
+        self.refine = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
 
-        # ---------------------------------------------------
-        # 4. 残差强度系数 gamma（核心）
-        #    - 通道级可学习参数
-        #    - 初始化为 0
-        #
-        #    关键性质：
-        #    gamma = 0 时：
-        #      模块整体 ≈ 恒等映射（非常保守）
-        #    gamma > 0 时：
-        #      模块才逐渐发挥增强/抑制作用
-        # ---------------------------------------------------
-        self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+        # 门控强度：给一个很小的初值，避免“学不起来”
+        self.gamma_gate = nn.Parameter(torch.ones(1, c2, 1, 1) * 0.05)
+        # 细化强度：继续 0-init，减少跨数据集副作用
+        self.gamma_ref = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
     def forward(self, x):
-        """
-        前向传播流程：
-        1. 通道压缩
-        2. 低分辨率门控生成
-        3. 残差式门控调制
-        4. 双线性上采样
-        5. 轻量细化（同样受 gamma 控制）
-        """
-
-        # 1. 通道压缩（仍在低分辨率）
         x_low = self.compress(x)
 
-        # 2. 生成门控权重（范围 [-1, 1]）
-        gate = self.gate_conv(x_low)
+        gate = self.gate_conv(x_low)          # (0, 1)
+        gate = gate - 0.5                     # 中心化到 (-0.5, 0.5)
 
-        # 3. 残差式调制
-        #    gamma = 0 时：out_low == x_low
-        out_low = x_low * (1.0 + self.gamma * gate)
+        out_low = x_low * (1.0 + self.gamma_gate * gate)
 
-        # 4. 统一进行一次上采样
-        out = F.interpolate(
-            out_low,
-            scale_factor=self.scale,
-            mode='bilinear',
-            align_corners=False
-        )
+        out = F.interpolate(out_low, scale_factor=self.scale,
+                            mode='bilinear', align_corners=False)
 
-        # 5. 上采样后细化（同样用残差，保证稳定）
-        out = out + self.gamma * self.refine(out)
-
+        out = out + self.gamma_ref * self.refine(out)
         return out
