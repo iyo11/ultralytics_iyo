@@ -3,108 +3,120 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class CPlus(nn.Module):
-    """
-    C+ 融合模块：实现 Concat -> Conv 1x1 -> Add 逻辑
-    """
+class ECA(nn.Module):
+    """Efficient Channel Attention (very light, learnable)"""
+    def __init__(self, k_size=3):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size=k_size, padding=(k_size - 1)//2, bias=False)
 
+    def forward(self, x):
+        y = self.avg_pool(x)  # [B,C,1,1]
+        y = self.conv(y.squeeze(-1).transpose(1, 2))  # [B,1,C]
+        y = torch.sigmoid(y.transpose(1, 2).unsqueeze(-1))  # [B,C,1,1]
+        return y
+
+
+class CPlusGate(nn.Module):
+    """Concat -> 1x1+BN+Act -> gated residual add"""
     def __init__(self, c):
         super().__init__()
-        self.conv1x1 = nn.Conv2d(c * 2, c, kernel_size=1, bias=False)
+        self.fuse = nn.Sequential(
+            nn.Conv2d(c * 2, c, 1, bias=False),
+            nn.BatchNorm2d(c),
+            nn.SiLU()
+        )
+        # start from 0 => near-identity at beginning (stable for backbone->neck)
+        self.alpha = nn.Parameter(torch.zeros(1, c, 1, 1))
 
     def forward(self, x_orig, x_proc):
-        out = torch.cat([x_proc, x_orig], dim=1)
-        out = self.conv1x1(out)
-        return out + x_orig
+        out = self.fuse(torch.cat([x_proc, x_orig], dim=1))
+        return x_orig + self.alpha * out
 
 
-class ParameterFreeChannelAttention(nn.Module):
-    """
-    无参通道注意力机制 (Parameter-free Channel Attention)
-    利用全局平均池化和全局最大池化的组合，通过 Sigmoid 激活生成权重
-    不需要任何训练参数 (bias, weight)
-    """
-
-    def __init__(self):
+class OrthoDW_PW(nn.Module):
+    """(1,k)+(k,1) depthwise -> PW mix -> BN+Act"""
+    def __init__(self, c, k=5, dilation=1):
         super().__init__()
+        pad = (k // 2) * dilation
+        self.dw = nn.Sequential(
+            nn.Conv2d(c, c, kernel_size=(1, k), padding=(0, pad), dilation=dilation, groups=c, bias=False),
+            nn.Conv2d(c, c, kernel_size=(k, 1), padding=(pad, 0), dilation=dilation, groups=c, bias=False),
+        )
+        self.pw = nn.Sequential(
+            nn.Conv2d(c, c, 1, bias=False),
+            nn.BatchNorm2d(c),
+            nn.SiLU()
+        )
 
     def forward(self, x):
-        # 使用全局平均池化 (GAP) 捕捉全局背景
-        avg_out = torch.mean(x, dim=(2, 3), keepdim=True)
-        # 使用全局最大池化 (GMP) 捕捉显著特征 (可选，增加鲁棒性)
-        # 先算维度 2 的最大值，再算维度 3 的最大值
-        max_out = torch.max(x, dim=2, keepdim=True)[0]
-        max_out = torch.max(max_out, dim=3, keepdim=True)[0]
-
-        # 融合两者（或只选其一）并通过 Sigmoid 归一化到 0-1
-        # 这里采用均值和最大值的均值，能够更全面地反映通道重要性
-        out = 0.5 * (avg_out + max_out)
-        return torch.sigmoid(out)
+        return self.pw(self.dw(x))
 
 
-class BHFM(nn.Module):
+class BHFMv2(nn.Module):
     """
-    Bio-inspired Hierarchical Feature Modulation (BHFM)
-    已将通道注意力更换为无参版本
+    Backbone->Neck friendly:
+    - ECA channel attention (learnable but tiny)
+    - OrthoDW + PW mixing
+    - LayerScale gating on multiplicative / additive branches
+    - Reduce over-smoothing: dilation=2 instead of 3 by default
     """
-
-    def __init__(self, c1, c2):
+    def __init__(self, c1, c2, eca_k=3, k_small=5, k_large=7, dil_large=2):
         super().__init__()
-        self.project = nn.Conv2d(c1, c2, 1) if c1 != c2 else nn.Identity()
+        self.project = nn.Conv2d(c1, c2, 1, bias=False) if c1 != c2 else nn.Identity()
         c = c2
 
-        # 左侧：空间特征提取器
-        self.ortho_conv5 = nn.Sequential(
-            nn.Conv2d(c, c, kernel_size=(1, 5), padding=(0, 2), groups=c),
-            nn.Conv2d(c, c, kernel_size=(5, 1), padding=(2, 0), groups=c)
+        # spatial branches
+        self.ortho_small = OrthoDW_PW(c, k=k_small, dilation=1)
+        self.ortho_large = OrthoDW_PW(c, k=k_large, dilation=dil_large)
+
+        # fusions
+        self.cplus1 = CPlusGate(c)
+        self.cplus2 = CPlusGate(c)
+
+        # channel attention
+        self.ca = ECA(k_size=eca_k)
+
+        # post
+        self.conv1x1 = nn.Sequential(
+            nn.Conv2d(c, c, 1, bias=False),
+            nn.BatchNorm2d(c),
+            nn.SiLU()
         )
-        self.ortho_conv19 = nn.Sequential(
-            nn.Conv2d(c, c, kernel_size=(1, 7), padding=(0, 9), dilation=3, groups=c),
-            nn.Conv2d(c, c, kernel_size=(7, 1), padding=(9, 0), dilation=3, groups=c)
-        )
-
-        # C+ 融合模块
-        self.cplus1 = CPlus(c)
-        self.cplus2 = CPlus(c)
-
-        # 右侧：更换为无参通道注意力
-        self.channel_attn = ParameterFreeChannelAttention()
-
-        # 底部组件
-        self.conv1x1 = nn.Conv2d(c, c, 1, bias=False)
         self.norm = nn.BatchNorm2d(c)
 
+        # LayerScale gates (start 0 => safe)
+        self.gamma_mul = nn.Parameter(torch.zeros(1, c, 1, 1))
+        self.gamma_ca  = nn.Parameter(torch.zeros(1, c, 1, 1))
+        self.gamma_out = nn.Parameter(torch.zeros(1, c, 1, 1))
+
     def forward(self, x):
-        # 0. 初始输入对齐
         x = self.project(x)
 
-        # 1. 顶部：并行进入 Channel Attention 和 OrthoConv 5x5
-        ca_weight = self.channel_attn(x)
-        feat5 = self.ortho_conv5(x)
+        # CA weight
+        ca_w = self.ca(x)  # [B,C,1,1]
 
-        # 2. 第一个 C+：融合 OrthoConv 5x5 的输出与原始 Input
-        feat_cplus1 = self.cplus1(x, feat5)
+        # spatial small -> cplus
+        feat_s = self.ortho_small(x)
+        y1 = self.cplus1(x, feat_s)
 
-        # 3. 经过 OrthoConv 19x19
-        feat19 = self.ortho_conv19(feat_cplus1)
+        # spatial large -> cplus
+        feat_l = self.ortho_large(y1)
+        y2 = self.cplus2(y1, feat_l)
 
-        # 4. 第二个 C+
-        feat_cplus2 = self.cplus2(feat_cplus1, feat19)
+        # multiplicative node (gated to avoid killing small objects)
+        mul = x + self.gamma_mul * (y2 * x)
 
-        # 5. 乘法节点 (×)
-        feat_mul1 = feat_cplus2 * x
+        # conv + residual
+        z = self.conv1x1(mul)
+        z = z + x
 
-        # 6. Conv 1x1
-        feat_conv = self.conv1x1(feat_mul1)
+        # CA modulation (convert to gentle modulation around 1.0)
+        # (ca_w in 0..1) -> (-1..1) -> scaled -> (1 + ...)
+        ca_delta = (ca_w - 0.5) * 2.0
+        z = z * (1.0 + self.gamma_ca * ca_delta)
 
-        # 7. 加法节点 (+)
-        feat_add = feat_conv + x
+        z = self.norm(z)
 
-        # 8. 乘法节点 (×)：使用无参生成的 ca_weight 进行调制
-        feat_mod = feat_add * ca_weight
-
-        # 9. Norm 归一化
-        feat_norm = self.norm(feat_mod)
-
-        # 10. 底部加法节点 (+)
-        return feat_norm + x
+        # final residual (gated)
+        return x + self.gamma_out * z
