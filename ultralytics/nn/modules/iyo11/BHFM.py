@@ -1,151 +1,111 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-
-class BasicConv(nn.Module):
-    """标准卷积: Conv + BN + SiLU"""
-
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, dilation=1):
+class CPlus(nn.Module):
+    """
+    C+ 融合模块：实现 Concat -> Conv 1x1 -> Add 逻辑
+    """
+    def __init__(self, c):
         super().__init__()
-        padding = ((kernel_size - 1) * dilation) // 2
-        self.conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            bias=False
-        )
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.act = nn.SiLU(inplace=True)
+        self.conv1x1 = nn.Conv2d(c * 2, c, kernel_size=1, bias=False)
 
-    def forward(self, x):
-        return self.act(self.bn(self.conv(x)))
-
-
-class OrthoBlock(nn.Module):
-    """正交/空间分离卷积 (1xK + Kx1)"""
-
-    def __init__(self, c, kernel_size=3, dilation=1):
-        super().__init__()
-        pad = ((kernel_size - 1) * dilation) // 2
-        self.conv_1xk = nn.Conv2d(c, c, kernel_size=(1, kernel_size), stride=1,
-                                  padding=(0, pad), dilation=dilation, bias=False)
-        self.conv_kx1 = nn.Conv2d(c, c, kernel_size=(kernel_size, 1), stride=1,
-                                  padding=(pad, 0), dilation=dilation, bias=False)
-        self.bn = nn.BatchNorm2d(c)
-        self.act = nn.SiLU(inplace=True)
-
-    def forward(self, x):
-        x = self.conv_1xk(x)
-        x = self.conv_kx1(x)
-        return self.act(self.bn(x))
-
-
-class CBAM(nn.Module):
-    """CBAM 注意力模块"""
-
-    def __init__(self, c, ratio=16, kernel_size=7):
-        super(CBAM, self).__init__()
-        self.ca = ChannelAttention(c, ratio=ratio)
-        self.sa = SpatialAttention(kernel_size=kernel_size)
-
-    def forward(self, x):
-        x = x * self.ca(x)
-        x = x * self.sa(x)
-        return x
-
+    def forward(self, x_orig, x_proc):
+        # x_orig: 原始特征A, x_proc: 处理后特征B
+        # 1. Concat
+        out = torch.cat([x_proc, x_orig], dim=1)
+        # 2. Conv 1x1
+        out = self.conv1x1(out)
+        # 3. Residual Add (与原始特征A相加)
+        return out + x_orig
 
 class ChannelAttention(nn.Module):
-    def __init__(self, in_planes, ratio=16):
-        super(ChannelAttention, self).__init__()
-        hidden_planes = max(4, in_planes // ratio)
+    """BHFM 右分支：通道注意力机制"""
+
+    def __init__(self, channels, reduction=16):
+        super().__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        self.fc1 = nn.Conv2d(in_planes, hidden_planes, 1, bias=False)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Conv2d(hidden_planes, in_planes, 1, bias=False)
-        self.sigmoid = nn.Sigmoid()
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
-        avg_out = self.fc2(self.relu(self.fc1(self.avg_pool(x))))
-        max_out = self.fc2(self.relu(self.fc1(self.max_pool(x))))
-        return self.sigmoid(avg_out + max_out)
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return y  # 注意：图中右分支输出后是与主路径相乘，这里只返回权重
 
 
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        padding = 3 if kernel_size == 7 else 1
-        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = torch.cat([avg_out, max_out], dim=1)
-        x = self.conv1(x)
-        return self.sigmoid(x)
-
-
-# ==========================================
-#  BHFM (Split Version) - 低参数量版
-# ==========================================
 class BHFM(nn.Module):
+    """
+    Bio-inspired Hierarchical Feature Modulation (BHFM) 最终版
+    严格对照 image_031c8.png 的复杂残差与 C+ 逻辑实现
+    """
+
     def __init__(self, c1, c2):
         super().__init__()
-        self.c = c2
+        # 统一通道数
+        self.project = nn.Conv2d(c1, c2, 1) if c1 != c2 else nn.Identity()
+        c = c2
 
-        # 1. 输入投影（如果通道数变了，或者单纯为了特征对齐）
-        self.input_proj = None
-        if c1 != c2:
-            self.input_proj = BasicConv(c1, c2, kernel_size=1)
+        # 左侧：空间特征提取器
+        self.ortho_conv5 = nn.Sequential(
+            nn.Conv2d(c, c, kernel_size=(1, 5), padding=(0, 2), groups=c),
+            nn.Conv2d(c, c, kernel_size=(5, 1), padding=(2, 0), groups=c)
+        )
+        self.ortho_conv19 = nn.Sequential(
+            nn.Conv2d(c, c, kernel_size=(1, 7), padding=(0, 9), dilation=3, groups=c),
+            nn.Conv2d(c, c, kernel_size=(7, 1), padding=(9, 0), dilation=3, groups=c)
+        )
 
-        # 2. 计算分组通道数
-        # 我们把通道分成 3 份：[c_part, c_part, c_rest]
-        # 确保除不尽的时候也能正常运行
-        self.c_part = c2 // 3
-        self.c_rest = c2 - (2 * self.c_part)
+        # C+ 融合模块
+        self.cplus1 = CPlus(c)
+        self.cplus2 = CPlus(c)
 
-        # === 分支 1: 标准 3x3 (处理 1/3 通道) ===
-        self.branch_std = BasicConv(self.c_part, self.c_part, kernel_size=3)
+        # 右侧：通道注意力
+        self.channel_attn = ChannelAttention(c)
 
-        # === 分支 2: 空洞正交 (处理 1/3 通道) ===
-        self.branch_dilated = OrthoBlock(self.c_part, kernel_size=3, dilation=2)
-
-        # === 分支 3: 标准正交 (处理剩余通道) ===
-        self.branch_ortho = OrthoBlock(self.c_rest, kernel_size=3, dilation=1)
-
-        # === 融合层 ===
-        # Concat 后是 c2 通道，用 1x1 卷积做一次 Channel Mixing
-        # 这里的参数量只有原来的 1/9 (因为输入只有 c 而不是 3c，且前面分支参数也减少了)
-        self.fusion = BasicConv(c2, c2, kernel_size=1)
-
-        # === CBAM 注意力 ===
-        self.attention = CBAM(c2, ratio=16)
+        # 底部组件
+        self.conv1x1 = nn.Conv2d(c, c, 1, bias=False)
+        self.norm = nn.BatchNorm2d(c)
 
     def forward(self, x):
-        # 0. 对齐通道
-        if self.input_proj is not None:
-            x = self.input_proj(x)
+        # 0. 初始输入对齐 (Input)
+        x = self.project(x)
 
-        # 1. Split (切分)
-        # 按照初始化计算好的通道数切分
-        x_std, x_dil, x_ort = torch.split(x, [self.c_part, self.c_part, self.c_rest], dim=1)
+        # --- 流程开始 ---
 
-        # 2. Transform (并行处理)
-        x_std = self.branch_std(x_std)
-        x_dil = self.branch_dilated(x_dil)
-        x_ort = self.branch_ortho(x_ort)
+        # 1. 顶部：并行进入 Channel Attention 和 OrthoConv 5x5
+        ca_weight = self.channel_attn(x)
+        feat5 = self.ortho_conv5(x)
 
-        # 3. Merge (拼接)
-        x_cat = torch.cat([x_std, x_dil, x_ort], dim=1)
+        # 2. 第一个 C+：融合 OrthoConv 5x5 的输出与原始 Input
+        # 根据图示：B 是 feat5，A 是 Input
+        feat_cplus1 = self.cplus1(x, feat5)
 
-        # 4. Mix & Attention
-        x_fused = self.fusion(x_cat)
-        x_attn = self.attention(x_fused)
+        # 3. 经过 OrthoConv 19x19
+        feat19 = self.ortho_conv19(feat_cplus1)
 
-        # 5. Residual
-        return x + x_attn
+        # 4. 第二个 C+：融合 OrthoConv 19x19 的输出与上一个 C+ 的输出
+        # 根据图示：B 是 feat19，A 是 feat_cplus1
+        feat_cplus2 = self.cplus2(feat_cplus1, feat19)
+
+        # 5. 乘法节点 (×)：feat_cplus2 与 原始 Input 相乘
+        feat_mul1 = feat_cplus2 * x
+
+        # 6. Conv 1x1
+        feat_conv = self.conv1x1(feat_mul1)
+
+        # 7. 加法节点 (+)：feat_conv 与 原始 Input 相加
+        feat_add = feat_conv + x
+
+        # 8. 乘法节点 (×)：与右侧 Channel Attention 输出调制
+        feat_mod = feat_add * ca_weight
+
+        # 9. Norm 归一化
+        feat_norm = self.norm(feat_mod)
+
+        # 10. 底部加法节点 (+)：最终残差，与原始 Input 相加
+        return feat_norm + x
