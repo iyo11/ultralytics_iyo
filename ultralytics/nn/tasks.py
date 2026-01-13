@@ -95,6 +95,7 @@ from ultralytics.nn.modules.iyo11.MultiScaleAdaptiveWindowAttention import Multi
 from ultralytics.nn.modules.iyo11.PolaLinearAttention import PolaLinearAttention, C2PSA_PLA, C3k2_PolaLinearAttention
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_RDW_SDPA import Qwen_GatedAttention_RWD
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_SDPA import Qwen_GatedAttention_SDPA
+from ultralytics.nn.modules.iyo11.StableDSU import StableDSU
 from ultralytics.nn.modules.iyo11.TripletAttention import TripletAttention, C2PSA_TripleAttention
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.BFAM import C3k2_BFAM_1, C3k2_BFAM_2
@@ -1694,7 +1695,8 @@ def parse_model(d, ch, verbose=True):
             C3k2_BFAM_2,
             BHFM,
             TripletAttention,
-            C2PSA_TripleAttention
+            C2PSA_TripleAttention,
+            StableDSU
         }
     )
 
@@ -1797,6 +1799,9 @@ def parse_model(d, ch, verbose=True):
         elif m in {Dy_Sample, EUCB}:
             c2 = ch[f]
             args = [c2, *args]
+        elif m is StableDSU:
+            c2 = ch[f]
+            args = [c2, c2, *args]  # 自动将输入、输出通道设为一致s
 
         elif m in base_modules:
             # ---------------- FeatureFusion (two-input) special case ----------------
