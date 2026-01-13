@@ -88,12 +88,14 @@ from ultralytics.nn.modules.backbone.PoolFormerMSConvV2 import PoolFormerMSConvB
 from ultralytics.nn.modules.backbone.PoolFormerMSConvV3 import PoolFormerMSConvBlockV3
 from ultralytics.nn.modules.backbone.PoolFormerMsConv import PoolFormerMSConvBlock
 from ultralytics.nn.modules.iyo11.BHFM import BHFM
-from ultralytics.nn.modules.iyo11.C2LGA import LGA_SDPA, C2LGA, Light_LGA_SDPA
+from ultralytics.nn.modules.iyo11.C2LGA import Light_LGA_SDPA, C2LGA
 from ultralytics.nn.modules.iyo11.C2LGAv2 import C2LGA_V2
-from ultralytics.nn.modules.iyo11.C3LGPSA import C3LGPSA
+from ultralytics.nn.modules.iyo11.C3LGPSA import C3LGPSA, LGA_SDPA
 from ultralytics.nn.modules.iyo11.MultiScaleAdaptiveWindowAttention import MultiScaleAdaptiveWindowAttention
+from ultralytics.nn.modules.iyo11.PolaLinearAttention import PolaLinearAttention, C2PSA_PLA, C3k2_PolaLinearAttention
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_RDW_SDPA import Qwen_GatedAttention_RWD
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_SDPA import Qwen_GatedAttention_SDPA
+from ultralytics.nn.modules.iyo11.TripletAttention import TripletAttention, C2PSA_TripleAttention
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.BFAM import C3k2_BFAM_1, C3k2_BFAM_2
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
@@ -1690,7 +1692,9 @@ def parse_model(d, ch, verbose=True):
             C3k2_ScConv,
             C3k2_BFAM_1,
             C3k2_BFAM_2,
-            BHFM
+            BHFM,
+            TripletAttention,
+            C2PSA_TripleAttention
         }
     )
 
@@ -1759,7 +1763,7 @@ def parse_model(d, ch, verbose=True):
             C3k2_ScConv,
             Dy_Sample,
             C3k2_BFAM_1,
-            C3k2_BFAM_2,
+            C3k2_BFAM_2
         }
     )
 
@@ -1780,7 +1784,7 @@ def parse_model(d, ch, verbose=True):
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
 
-        if m in {PoolFormerBlock, PoolFormerMSConvBlock,PoolFormerMSConvBlockV2, PoolFormerMSConvBlockV3 }:
+        if m in {PoolFormerBlock, PoolFormerMSConvBlock,PoolFormerMSConvBlockV2, PoolFormerMSConvBlockV3, PolaLinearAttention }:
             # PoolFormerBlock: 输出通道等于输入通道
             c2 = ch[f]  # dim = in_channels
 
