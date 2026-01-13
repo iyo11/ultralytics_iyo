@@ -53,7 +53,7 @@ class OrthoDW_PW(nn.Module):
         return self.pw(self.dw(x))
 
 
-class BHFMv2(nn.Module):
+class BHFM(nn.Module):
     """
     Backbone->Neck friendly:
     - ECA channel attention (learnable but tiny)
