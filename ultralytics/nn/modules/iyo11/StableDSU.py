@@ -441,7 +441,74 @@
 #         return out + self.refine_gamma * self.refine_conv(out)
 
 #################################################################################################
-##E8
+##E8  ########2222
+#################################################################################################
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+#
+#
+# class StableDSU(nn.Module):
+#     """
+#     E9: Serial-Strip DSU (串联版)
+#     结构：Input -> [1x5 Conv] -> [5x1 Conv] -> ...
+#     效果：
+#     1. 感受野变成了实打实的满 5x5 矩形。
+#     2. 相比并行版，背景信息会被充分融合（对于纹理型目标可能更好）。
+#     """
+#
+#     def __init__(self, c1, c2, scale=2):
+#         super().__init__()
+#         self.scale = scale
+#
+#         # 1. 压缩
+#         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
+#
+#         # 2. 串联条形门控 (Sequential Strip Gating)
+#         # 第一步：横向扫 (1x5)
+#         self.gate_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
+#         # 第二步：纵向扫 (5x1)
+#         # 注意：这里把 gate_h 的输出作为输入，相当于把横向特征在纵向进行了扩散
+#         self.gate_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
+#
+#         # 门控激活与融合
+#         # 此时的特征已经具备了 5x5 的上下文
+#         self.gate_norm = nn.BatchNorm2d(c2)
+#         self.gate_act = nn.SiLU()
+#         self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
+#
+#         # E4 Trick: 零初始化 Gamma
+#         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+#
+#         # 3. 细节 Refine (保持 E7 的残差结构，防止小目标丢失太严重)
+#         self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+#         self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+#
+#     def forward(self, x):
+#         x_low = self.compress(x)
+#
+#         # === 串联处理 (Serial) ===
+#         # 1. 先提取横向特征
+#         feat_h = self.gate_h(x_low)
+#         # 2. 基于横向特征，再提取纵向特征
+#         # 这一步完成后，feat_v 中的每个点都包含了原始 x_low 中 5x5 区域的信息
+#         feat_full = self.gate_v(feat_h)
+#
+#         # 生成 Mask
+#         mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_full)))
+#         mask_low = torch.tanh(mask_raw)
+#
+#         # 应用门控
+#         out_low = x_low * (1 + self.gamma * mask_low)
+#
+#         # 上采样
+#         out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+#
+#         # 残差锐化
+#         return out + self.refine_gamma * self.refine_conv(out)
+
+#################################################################################################
+##E9
 #################################################################################################
 import torch
 import torch.nn as nn
@@ -449,13 +516,6 @@ import torch.nn.functional as F
 
 
 class StableDSU(nn.Module):
-    """
-    E9: Serial-Strip DSU (串联版)
-    结构：Input -> [1x5 Conv] -> [5x1 Conv] -> ...
-    效果：
-    1. 感受野变成了实打实的满 5x5 矩形。
-    2. 相比并行版，背景信息会被充分融合（对于纹理型目标可能更好）。
-    """
 
     def __init__(self, c1, c2, scale=2):
         super().__init__()
@@ -464,38 +524,41 @@ class StableDSU(nn.Module):
         # 1. 压缩
         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
 
-        # 2. 串联条形门控 (Sequential Strip Gating)
-        # 第一步：横向扫 (1x5)
+        # 2. 并行条形门控 (Parallel Strip Gating)
+        # 改为并行：分别提取横向和纵向，互不干扰，保护边缘
         self.gate_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
-        # 第二步：纵向扫 (5x1)
-        # 注意：这里把 gate_h 的输出作为输入，相当于把横向特征在纵向进行了扩散
         self.gate_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
 
-        # 门控激活与融合
-        # 此时的特征已经具备了 5x5 的上下文
+        # 3. 原始局部细节保留 (非常重要！防止小目标被大核淹没)
+        # 使用 3x3 深度可分离卷积保留局部形状
+        self.local_path = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+
+        # 融合层
         self.gate_norm = nn.BatchNorm2d(c2)
         self.gate_act = nn.SiLU()
         self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
 
-        # E4 Trick: 零初始化 Gamma
+        # 初始化 Gamma
         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
-        # 3. 细节 Refine (保持 E7 的残差结构，防止小目标丢失太严重)
+        # Refine 保持不变
         self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
         self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
     def forward(self, x):
         x_low = self.compress(x)
 
-        # === 串联处理 (Serial) ===
-        # 1. 先提取横向特征
+        # === 并行处理 (Parallel) ===
+        # 这样立交桥的横向特征不会被纵向卷积给模糊掉
         feat_h = self.gate_h(x_low)
-        # 2. 基于横向特征，再提取纵向特征
-        # 这一步完成后，feat_v 中的每个点都包含了原始 x_low 中 5x5 区域的信息
-        feat_full = self.gate_v(feat_h)
+        feat_v = self.gate_v(x_low)
+        feat_local = self.local_path(x_low)  # 保留原始几何形状
+
+        # 融合：相加优于串联，因为它允许特征叠加而非强制混合
+        feat_sum = feat_h + feat_v + feat_local
 
         # 生成 Mask
-        mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_full)))
+        mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_sum)))
         mask_low = torch.tanh(mask_raw)
 
         # 应用门控
