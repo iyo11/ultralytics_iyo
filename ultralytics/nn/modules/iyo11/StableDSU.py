@@ -217,7 +217,42 @@
 
 #################################################################################################
 ##E4 + DWConv → DWConv+PWConv+残差
-#################################################################################################\
+#################################################################################################
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+# class StableDSU(nn.Module):
+#     def __init__(self, c1, c2, scale=2):
+#         super().__init__()
+#         self.scale = scale
+#         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
+#
+#         self.gate_conv = nn.Sequential(
+#             nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
+#             nn.BatchNorm2d(c2),
+#             nn.SiLU(),
+#             nn.Conv2d(c2, c2, 1, bias=False),
+#         )
+#
+#         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+#
+#         # ONLY change: refine upgraded
+#         self.refine_dw = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+#         self.refine_pw = nn.Conv2d(c2, c2, 1, bias=False)
+#
+#     def forward(self, x):
+#         x_low = self.compress(x)
+#         mask_low = torch.tanh(self.gate_conv(x_low))
+#         out_low = x_low * (1 + self.gamma * mask_low)
+#         out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+#
+#         y = self.refine_pw(self.refine_dw(out))
+#         return out + y   # residual refine
+
+
+#################################################################################################
+##E4 + 只改“gate 做 residual”（仍然 BN + refine=DW 不变）
+#################################################################################################
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -235,16 +270,17 @@ class StableDSU(nn.Module):
         )
 
         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
-
-        # ONLY change: refine upgraded
-        self.refine_dw = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
-        self.refine_pw = nn.Conv2d(c2, c2, 1, bias=False)
+        self.refine = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
 
     def forward(self, x):
         x_low = self.compress(x)
-        mask_low = torch.tanh(self.gate_conv(x_low))
-        out_low = x_low * (1 + self.gamma * mask_low)
-        out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
 
-        y = self.refine_pw(self.refine_dw(out))
-        return out + y   # residual refine
+        # main
+        main = F.interpolate(x_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+
+        # residual gate (ONLY change vs E4)
+        mask_low = torch.tanh(self.gate_conv(x_low))  # [-1, 1]
+        res = F.interpolate(mask_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+
+        out = main + self.gamma * res
+        return self.refine(out)
