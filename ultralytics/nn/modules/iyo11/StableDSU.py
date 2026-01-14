@@ -342,26 +342,14 @@
 #         return self.refine(out)
 
 #################################################################################################
-##E7
+##E4 nearest
 #################################################################################################
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-def icnr_init(weight, scale=2):
-    # weight: [out_c, in_c, k, k], out_c should be c2 * scale^2
-    out_c, in_c, k1, k2 = weight.shape
-    r = scale ** 2
-    if out_c % r != 0:
-        return
-    sub_c = out_c // r
-    w = torch.randn(sub_c, in_c, k1, k2)
-    w = w.repeat_interleave(r, dim=0)
-    with torch.no_grad():
-        weight.copy_(w)
-
 class StableDSU(nn.Module):
-    def __init__(self, c1, c2, scale=2, use_icnr=True):
+    def __init__(self, c1, c2, scale=2):
         super().__init__()
         self.scale = scale
 
@@ -373,48 +361,15 @@ class StableDSU(nn.Module):
             nn.SiLU(),
             nn.Conv2d(c2, c2, 1, bias=False),
         )
+
         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
-        # 方案C：DW + PW 生成 c2*s^2（更稳/更轻），你也可以换回你原来的普通3x3
-        out_c = c2 * (scale ** 2)
-        self.up_conv = nn.Sequential(
-            nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
-            nn.BatchNorm2d(c2),
-            nn.SiLU(),
-            nn.Conv2d(c2, out_c, 1, bias=False),
-            nn.BatchNorm2d(out_c),
-            nn.SiLU(),
-        )
-
-        # 如果你坚持用原始普通3x3版本，用这个替换上面 up_conv 即可：
-        # self.up_conv = nn.Sequential(
-        #     nn.Conv2d(c2, out_c, 3, padding=1, bias=False),
-        #     nn.BatchNorm2d(out_c),
-        #     nn.SiLU(),
-        # )
-
-        self.pixel_shuffle = nn.PixelShuffle(scale)
-
-        # 改动B：refine 用普通3x3 + 激活（更抹格栅）
-        self.refine = nn.Sequential(
-            nn.Conv2d(c2, c2, 3, padding=1, bias=False),
-            nn.BatchNorm2d(c2),
-            nn.SiLU(),
-            nn.Conv2d(c2, c2, 1, bias=False),
-        )
-
-        if use_icnr:
-            # 找到生成 out_c 的那一层 Conv 权重来 init
-            # 这里是 up_conv 的最后一个 Conv2d(1x1)
-            conv = self.up_conv[3]
-            icnr_init(conv.weight, scale=scale)
+        self.refine = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
 
     def forward(self, x):
         x_low = self.compress(x)
         mask_low = torch.tanh(self.gate_conv(x_low))
+        out_low = x_low * (1 + self.gamma * mask_low)
 
-        # 保持你原始：乘法改写主干
-        out_low = x_low * (1.0 + self.gamma * mask_low)
-
-        out = self.pixel_shuffle(self.up_conv(out_low))
+        out = F.interpolate(out_low, scale_factor=self.scale, mode='nearest')
         return self.refine(out)
