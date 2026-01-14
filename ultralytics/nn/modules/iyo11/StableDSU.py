@@ -284,3 +284,44 @@ class StableDSU(nn.Module):
 #
 #         out = main + self.gamma * res
 #         return self.refine(out)
+
+
+#################################################################################################
+##E5
+#################################################################################################
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class StableDSU(nn.Module):
+    def __init__(self, c1, c2, scale=2):
+        super().__init__()
+        self.scale = scale
+
+        self.compress = nn.Conv2d(c1, c2, 1, bias=False)
+
+        self.gate_conv = nn.Sequential(
+            nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
+            nn.BatchNorm2d(c2),
+            nn.SiLU(),
+            nn.Conv2d(c2, c2, 1, bias=False),
+        )
+        self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+
+        self.refine_low = nn.Sequential(
+            nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
+            nn.Conv2d(c2, c2, 1, bias=False),
+        )
+
+        # 只做一个 very cheap 的 high-res 修复
+        self.refine_high_dw = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+
+    def forward(self, x):
+        x_low = self.compress(x)
+        mask_low = torch.tanh(self.gate_conv(x_low))
+        out_low = x_low * (1 + self.gamma * mask_low)
+
+        out_low = self.refine_low(out_low)
+        out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+
+        return self.refine_high_dw(out)
