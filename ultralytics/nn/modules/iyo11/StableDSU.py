@@ -183,37 +183,37 @@
 #################################################################################################
 ##E4  效果最好
 #################################################################################################
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class StableDSU(nn.Module):
-    def __init__(self, c1, c2, scale=2):
-        super().__init__()
-        self.scale = scale
-
-        self.compress = nn.Conv2d(c1, c2, 1, bias=False)
-
-        # gate: 生成“可增强可抑制”的mask（tanh）
-        self.gate_conv = nn.Sequential(
-            nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
-            nn.BatchNorm2d(c2),
-            nn.SiLU(),
-            nn.Conv2d(c2, c2, 1, bias=False),
-        )
-
-        # 关键：稳定起步，避免一上来就把纹理噪声抬起来
-        self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
-
-        self.refine = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
-
-    def forward(self, x):
-        x_low = self.compress(x)
-        mask_low = torch.tanh(self.gate_conv(x_low))          # [-1, 1]
-        out_low = x_low * (1 + self.gamma * mask_low)         # 可增强可抑制，且初始≈x_low
-
-        out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
-        return self.refine(out)
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+#
+# class StableDSU(nn.Module):
+#     def __init__(self, c1, c2, scale=2):
+#         super().__init__()
+#         self.scale = scale
+#
+#         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
+#
+#         # gate: 生成“可增强可抑制”的mask（tanh）
+#         self.gate_conv = nn.Sequential(
+#             nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
+#             nn.BatchNorm2d(c2),
+#             nn.SiLU(),
+#             nn.Conv2d(c2, c2, 1, bias=False),
+#         )
+#
+#         # 关键：稳定起步，避免一上来就把纹理噪声抬起来
+#         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+#
+#         self.refine = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+#
+#     def forward(self, x):
+#         x_low = self.compress(x)
+#         mask_low = torch.tanh(self.gate_conv(x_low))          # [-1, 1]
+#         out_low = x_low * (1 + self.gamma * mask_low)         # 可增强可抑制，且初始≈x_low
+#
+#         out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+#         return self.refine(out)
 
 #################################################################################################
 ##E4 + DWConv → DWConv+PWConv+残差
@@ -287,8 +287,9 @@ class StableDSU(nn.Module):
 
 
 #################################################################################################
-##E5
+##E6 + PixelShuffle
 #################################################################################################
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -298,8 +299,10 @@ class StableDSU(nn.Module):
         super().__init__()
         self.scale = scale
 
+        # 1. 通道压缩
         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
 
+        # 2. 动态门控生成 (保持低分辨率下的空间增强控制)
         self.gate_conv = nn.Sequential(
             nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
             nn.BatchNorm2d(c2),
@@ -308,20 +311,32 @@ class StableDSU(nn.Module):
         )
         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
-        self.refine_low = nn.Sequential(
+        # 3. 关键修改：为 PixelShuffle 准备的通道扩充层
+        # PixelShuffle 会将通道维度 (C * scale^2) 搬运到空间维度 (H*scale, W*scale)
+        # 为了保证输出通道依然是 c2，这里输入通道需要扩充到 c2 * (scale**2)
+        self.up_conv = nn.Sequential(
+            nn.Conv2d(c2, c2 * (scale ** 2), 3, padding=1, groups=1, bias=False),
+            nn.BatchNorm2d(c2 * (scale ** 2)),
+            nn.SiLU()
+        )
+        self.pixel_shuffle = nn.PixelShuffle(scale)
+
+        # 4. 细节修正层 (针对 PixelShuffle 可能产生的棋盘效应进行平滑)
+        # 建议这里使用正常的卷积而非深度卷积，或者深度卷积+逐点卷积，以增强特征融合
+        self.refine = nn.Sequential(
             nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
-            nn.Conv2d(c2, c2, 1, bias=False),
+            nn.Conv2d(c2, c2, 1, bias=False)
         )
 
-        # 只做一个 very cheap 的 high-res 修复
-        self.refine_high_dw = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
-
     def forward(self, x):
+        # 低分辨特征提取与增强
         x_low = self.compress(x)
         mask_low = torch.tanh(self.gate_conv(x_low))
         out_low = x_low * (1 + self.gamma * mask_low)
 
-        out_low = self.refine_low(out_low)
-        out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+        # 亚像素上采样
+        out_high_res = self.up_conv(out_low)
+        out = self.pixel_shuffle(out_high_res)
 
-        return self.refine_high_dw(out)
+        # 最终细节修复
+        return self.refine(out)
