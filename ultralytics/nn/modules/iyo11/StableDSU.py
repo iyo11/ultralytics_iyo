@@ -472,8 +472,8 @@ class StableDSU(nn.Module):
 
         # Path B: Strip DWConv -> 专注"线"和长条 (引入 E7 的优势)
         # 为了进一步省参数，这里可以用更激进的 1x7，或者保持 1x5
-        self.gate_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
-        self.gate_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
+        self.gate_h = nn.Conv2d(c2, c2, (1, 7), padding=(0, 2), groups=c2, bias=False)
+        self.gate_v = nn.Conv2d(c2, c2, (7, 1), padding=(2, 0), groups=c2, bias=False)
 
         # 门控融合层
         self.gate_norm = nn.BatchNorm2d(c2)
