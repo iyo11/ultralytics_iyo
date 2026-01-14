@@ -91,6 +91,7 @@ from ultralytics.nn.modules.iyo11.BHFM import BHFM
 from ultralytics.nn.modules.iyo11.C2LGA import Light_LGA_SDPA, C2LGA
 from ultralytics.nn.modules.iyo11.C2LGAv2 import C2LGA_V2
 from ultralytics.nn.modules.iyo11.C3LGPSA import C3LGPSA, LGA_SDPA
+from ultralytics.nn.modules.iyo11.MambaSequenceUpsample import HybridSS2DUpsample
 from ultralytics.nn.modules.iyo11.MultiScaleAdaptiveWindowAttention import MultiScaleAdaptiveWindowAttention
 from ultralytics.nn.modules.iyo11.PolaLinearAttention import PolaLinearAttention, C2PSA_PLA, C3k2_PolaLinearAttention
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_RDW_SDPA import Qwen_GatedAttention_RWD
@@ -1696,7 +1697,8 @@ def parse_model(d, ch, verbose=True):
             BHFM,
             TripletAttention,
             C2PSA_TripleAttention,
-            StableDSU
+            StableDSU,
+            HybridSS2DUpsample
         }
     )
 
@@ -1799,7 +1801,7 @@ def parse_model(d, ch, verbose=True):
         elif m in {Dy_Sample, EUCB}:
             c2 = ch[f]
             args = [c2, *args]
-        elif m is StableDSU:
+        elif m in {StableDSU, HybridSS2DUpsample}:
             c2 = ch[f]
             args = [c2, c2, *args]  # 自动将输入、输出通道设为一致s
 

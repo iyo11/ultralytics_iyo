@@ -113,7 +113,7 @@ class BHFM(nn.Module):
 
         # CA modulation (convert to gentle modulation around 1.0)
         # (ca_w in 0..1) -> (-1..1) -> scaled -> (1 + ...)
-        ca_delta = (ca_w - 0.5) * 2.0
+        ca_delta = (ca_w - 0.5) * 2.
         z = z * (1.0 + self.gamma_ca * ca_delta)
 
         z = self.norm(z)
