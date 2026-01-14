@@ -344,32 +344,98 @@
 #################################################################################################
 ##E4 nearest
 #################################################################################################
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+#
+# class StableDSU(nn.Module):
+#     def __init__(self, c1, c2, scale=2):
+#         super().__init__()
+#         self.scale = scale
+#
+#         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
+#
+#         self.gate_conv = nn.Sequential(
+#             nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
+#             nn.BatchNorm2d(c2),
+#             nn.SiLU(),
+#             nn.Conv2d(c2, c2, 1, bias=False),
+#         )
+#
+#         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+#
+#         self.refine = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+#
+#     def forward(self, x):
+#         x_low = self.compress(x)
+#         mask_low = torch.tanh(self.gate_conv(x_low))
+#         out_low = x_low * (1 + self.gamma * mask_low)
+#
+#         out = F.interpolate(out_low, scale_factor=self.scale, mode='nearest')
+#         return self.refine(out)
+
+#################################################################################################
+##E7  __gemini 设计
+#################################################################################################
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class StableDSU(nn.Module):
+    """
+    E7: Strip-Gated DSU (针对小目标与长条目标的特化版)
+    继承 E4 的稳定性 (Tanh + Zero-init)，引入条形卷积解决几何劣势。
+    """
+
     def __init__(self, c1, c2, scale=2):
         super().__init__()
         self.scale = scale
 
+        # 1. 压缩通道 (保持高效)
         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
 
-        self.gate_conv = nn.Sequential(
-            nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False),
-            nn.BatchNorm2d(c2),
-            nn.SiLU(),
-            nn.Conv2d(c2, c2, 1, bias=False),
-        )
+        # 2. 条形门控 (Strip Gating) - 解决长条目标问题
+        # 相比普通的 3x3，使用 5x1 和 1x5 并联
+        # k=5 可以看更远，且不会像 3x3 那样引入过多背景噪声
+        self.gate_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
+        self.gate_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
 
+        # 门控的后处理 (BN + SiLU + 1x1 融合)
+        self.gate_norm = nn.BatchNorm2d(c2)
+        self.gate_act = nn.SiLU()
+        self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
+
+        # E4 的核心 trick：零初始化 Gamma，保证训练初期极其稳定
         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
-        self.refine = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+        # 3. 改进的 Refine：残差结构 - 解决小目标模糊问题
+        # 通过 res_refine 学习高频残差（锐化），而不是重构整个特征
+        self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+        self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
     def forward(self, x):
+        # [Step 1] 降维
         x_low = self.compress(x)
-        mask_low = torch.tanh(self.gate_conv(x_low))
+
+        # [Step 2] 条形特征提取 (并行提取横向和纵向上下文)
+        # 这样电线杆(纵向)和车辆(横向/块状)都能被捕捉，且互不干扰
+        g_h = self.gate_h(x_low)
+        g_v = self.gate_v(x_low)
+
+        # 融合特征生成 Mask
+        mask_feat = self.gate_fusion(self.gate_act(self.gate_norm(g_h + g_v)))
+
+        # 使用 Tanh 允许抑制背景 (-1) 和增强目标 (+1)
+        mask_low = torch.tanh(mask_feat)
+
+        # 应用门控 (E4 逻辑)
         out_low = x_low * (1 + self.gamma * mask_low)
 
-        out = F.interpolate(out_low, scale_factor=self.scale, mode='nearest')
-        return self.refine(out)
+        # [Step 3] 上采样 (Bilinear 最稳，不要动)
+        out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+
+        # [Step 4] 细节修复 (Residual Refine)
+        # out 是模糊的，refine_conv 负责计算“锐化残差”
+        # 初始化为 0，让模型慢慢学着去锐化边缘
+        return out + self.refine_gamma * self.refine_conv(out)
