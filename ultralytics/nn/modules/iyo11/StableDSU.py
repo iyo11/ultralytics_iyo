@@ -450,63 +450,59 @@ import torch.nn.functional as F
 
 class StableDSU(nn.Module):
     """
-    E8: Omni-Gated DSU (全向动态门控)
-    核心思想：并联！并联！并联！
-    - 一路 3x3 专门保小目标 (点)
-    - 一路 1x5/5x1 专门抓长条 (线)
-    - 最后融合，互不拖累
+    E9: Serial-Strip DSU (串联版)
+    结构：Input -> [1x5 Conv] -> [5x1 Conv] -> ...
+    效果：
+    1. 感受野变成了实打实的满 5x5 矩形。
+    2. 相比并行版，背景信息会被充分融合（对于纹理型目标可能更好）。
     """
 
     def __init__(self, c1, c2, scale=2):
         super().__init__()
         self.scale = scale
 
-        # 1. 压缩 (不变)
+        # 1. 压缩
         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
 
-        # 2. 多尺度感知门控 (Multi-Scale Gating)
-        # 既然 DWConv 很便宜，我们就奢侈一点，搞三路并联
+        # 2. 串联条形门控 (Sequential Strip Gating)
+        # 第一步：横向扫 (1x5)
+        self.gate_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
+        # 第二步：纵向扫 (5x1)
+        # 注意：这里把 gate_h 的输出作为输入，相当于把横向特征在纵向进行了扩散
+        self.gate_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
 
-        # Path A: 3x3 DWConv -> 专注"点"和小目标 (保留 E4 的优势)
-        self.gate_point = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
-
-        # Path B: Strip DWConv -> 专注"线"和长条 (引入 E7 的优势)
-        # 为了进一步省参数，这里可以用更激进的 1x7，或者保持 1x5
-        self.gate_h = nn.Conv2d(c2, c2, (1, 7), padding=(0, 2), groups=c2, bias=False)
-        self.gate_v = nn.Conv2d(c2, c2, (7, 1), padding=(2, 0), groups=c2, bias=False)
-
-        # 门控融合层
+        # 门控激活与融合
+        # 此时的特征已经具备了 5x5 的上下文
         self.gate_norm = nn.BatchNorm2d(c2)
         self.gate_act = nn.SiLU()
         self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
 
-        # 3. 零初始化 Gamma (E4 核心 Trick，保持不动)
+        # E4 Trick: 零初始化 Gamma
         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
-        # 4. 残差 Refine (E7 的改进，利于锐化)
+        # 3. 细节 Refine (保持 E7 的残差结构，防止小目标丢失太严重)
         self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
         self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
     def forward(self, x):
         x_low = self.compress(x)
 
-        # === 并联感知 ===
-        # 3x3 负责看局部细节
-        feat_point = self.gate_point(x_low)
-        # Strip 负责看上下文连接
-        feat_strip = self.gate_h(x_low) + self.gate_v(x_low)
+        # === 串联处理 (Serial) ===
+        # 1. 先提取横向特征
+        feat_h = self.gate_h(x_low)
+        # 2. 基于横向特征，再提取纵向特征
+        # 这一步完成后，feat_v 中的每个点都包含了原始 x_low 中 5x5 区域的信息
+        feat_full = self.gate_v(feat_h)
 
-        # === 融合 ===
-        # 简单相加：让网络自己决定听谁的。
-        # 如果是小目标，feat_point 响应大；如果是长条，feat_strip 响应大。
-        total_feat = feat_point + feat_strip
-
-        mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(total_feat)))
+        # 生成 Mask
+        mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_full)))
         mask_low = torch.tanh(mask_raw)
 
-        # === 应用 ===
+        # 应用门控
         out_low = x_low * (1 + self.gamma * mask_low)
 
-        # === 上采样 & 锐化 ===
+        # 上采样
         out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+
+        # 残差锐化
         return out + self.refine_gamma * self.refine_conv(out)
