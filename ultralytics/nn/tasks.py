@@ -98,7 +98,7 @@ from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_RDW_SDPA import Qwen_Gated
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_SDPA import Qwen_GatedAttention_SDPA
 from ultralytics.nn.modules.iyo11.StableDSU import StableDSU
 from ultralytics.nn.modules.iyo11.TripletAttention import TripletAttention, C2PSA_TripleAttention
-from ultralytics.nn.modules.iyo11.sdp import SDP, HSFPN_Fusion
+from ultralytics.nn.modules.iyo11.sdp import HSFPN_Fusion
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.BFAM import C3k2_BFAM_1, C3k2_BFAM_2
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
