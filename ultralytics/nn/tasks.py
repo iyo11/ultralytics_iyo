@@ -92,11 +92,13 @@ from ultralytics.nn.modules.iyo11.C2LGA import Light_LGA_SDPA, C2LGA
 from ultralytics.nn.modules.iyo11.C2LGAv2 import C2LGA_V2
 from ultralytics.nn.modules.iyo11.C3LGPSA import C3LGPSA, LGA_SDPA
 from ultralytics.nn.modules.iyo11.MultiScaleAdaptiveWindowAttention import MultiScaleAdaptiveWindowAttention
+from ultralytics.nn.modules.iyo11.PFMM import PFMM
 from ultralytics.nn.modules.iyo11.PolaLinearAttention import PolaLinearAttention, C2PSA_PLA, C3k2_PolaLinearAttention
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_RDW_SDPA import Qwen_GatedAttention_RWD
 from ultralytics.nn.modules.iyo11.Qwen_GatedAttention_SDPA import Qwen_GatedAttention_SDPA
 from ultralytics.nn.modules.iyo11.StableDSU import StableDSU
 from ultralytics.nn.modules.iyo11.TripletAttention import TripletAttention, C2PSA_TripleAttention
+from ultralytics.nn.modules.iyo11.sdp import SDP, HSFPN_Fusion
 from ultralytics.nn.modules.v11.ALFS import EFC, MSEF
 from ultralytics.nn.modules.v11.BFAM import C3k2_BFAM_1, C3k2_BFAM_2
 from ultralytics.nn.modules.v11.DSSA import C3k2_DSSA, DSSA, C3k_DSSA
@@ -1696,7 +1698,7 @@ def parse_model(d, ch, verbose=True):
             BHFM,
             TripletAttention,
             C2PSA_TripleAttention,
-            StableDSU,
+            StableDSU
         }
     )
 
@@ -1799,6 +1801,10 @@ def parse_model(d, ch, verbose=True):
         elif m in {Dy_Sample, EUCB}:
             c2 = ch[f]
             args = [c2, *args]
+        elif m in {PFMM}:
+            c1=ch[f[1]]
+            c2=ch[f[0]]
+            args = [c2, c1]
         elif m in {StableDSU}:
             c2 = ch[f]
             args = [c2, c2, *args]  # 自动将输入、输出通道设为一致s
@@ -1894,6 +1900,28 @@ def parse_model(d, ch, verbose=True):
 
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+
+            # === 【开始插入】 HS-FPN 注册逻辑 ===
+        elif m is HSFPN_Fusion:
+            # f 是来源层索引列表，例如 [-1, 6]
+            # [-1] 是 Top 层 (上采样后的 P5)，[6] 是 Lateral 层 (P4)
+            # 这里的逻辑是自动从 ch (通道列表) 中获取通道数
+
+            # 获取 Lateral 通道数 (对应 YAML 中的 6)
+            c_lateral = ch[f[1]]
+
+            # 获取 Top 通道数 (对应 YAML 中的 -1)
+            c_top = ch[f[0]]
+
+            # 重写 args，传给模块的 __init__
+            # 对应 HSFPN_Fusion(c1, c2) -> (c_lateral, c_top)
+            args = [c_lateral, c_top]
+
+            # 定义该层的输出通道数 c2
+            # 根据论文逻辑，HS-FPN 输出尺寸与 Lateral 层一致 [cite: 10, 11]
+            c2 = c_lateral
+            # === 【结束插入】 ===
+
 
         elif m in frozenset(
             {
