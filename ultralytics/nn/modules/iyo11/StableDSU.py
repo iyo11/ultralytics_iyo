@@ -598,32 +598,32 @@ import torch.nn.functional as F
 
 class StableDSU(nn.Module):
     """
-    E9-FEM-Parallel-Only (Lite)
-    改动点：并行上下文分支改成 FEM 风格（先降维 inter_planes，再卷积，再 cat 融合回 c2）
-    其余：BN / SiLU / tanh / gamma / refine / upsample 全部保持 E9
+    E9-FEM-Parallel-Only (Lite) + Residual-only Gate
+    - FEM-style 并行上下文分支：不动
+    - mask 生成：BN/SiLU/1x1 + tanh：不动
+    - 关键改动：gate 只做 residual，不改写主干 x_low
+    - refine：不动
     """
 
     def __init__(self, c1, c2, scale=2, dilation=5, map_reduce=8):
         super().__init__()
         self.scale = scale
 
-        # 1) 压缩（不动）
+        # 1) 压缩
         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
 
         # -----------------------------
-        # FEM-style 并行分支（省计算关键）
+        # FEM-style 并行分支
         # -----------------------------
-        inter = max(1, c2 // map_reduce)          # inter_planes
-        inter2 = max(1, 2 * inter)               # 2*inter_planes
-        inter_mid = max(1, (inter // 2) * 3)     # (inter//2)*3，避免为 0
+        inter = max(1, c2 // map_reduce)
+        inter2 = max(1, 2 * inter)
+        inter_mid = max(1, (inter // 2) * 3)
 
-        # Branch0: 1x1 (c2 -> 2inter) -> 3x3 (2inter -> 2inter)
         self.p_b0 = nn.Sequential(
             nn.Conv2d(c2, inter2, 1, bias=False),
             nn.Conv2d(inter2, inter2, 3, padding=1, bias=False),
         )
 
-        # Branch1: 1x1 (c2->inter) -> 1x3 -> 3x1 -> dilated 3x3 (2inter->2inter)
         self.p_b1 = nn.Sequential(
             nn.Conv2d(c2, inter, 1, bias=False),
             nn.Conv2d(inter, inter_mid, (1, 3), padding=(0, 1), bias=False),
@@ -631,7 +631,6 @@ class StableDSU(nn.Module):
             nn.Conv2d(inter2, inter2, 3, padding=dilation, dilation=dilation, bias=False),
         )
 
-        # Branch2: 1x1 (c2->inter) -> 3x1 -> 1x3 -> dilated 3x3 (2inter->2inter)
         self.p_b2 = nn.Sequential(
             nn.Conv2d(c2, inter, 1, bias=False),
             nn.Conv2d(inter, inter_mid, (3, 1), padding=(1, 0), bias=False),
@@ -639,10 +638,9 @@ class StableDSU(nn.Module):
             nn.Conv2d(inter2, inter2, 3, padding=dilation, dilation=dilation, bias=False),
         )
 
-        # concat( (2inter)*3 ) -> c2
         self.p_fuse = nn.Conv2d(inter2 * 3, c2, 1, bias=False)
 
-        # 2) 门控生成（E9 原样）
+        # 2) mask 生成（E9 原样）
         self.gate_norm = nn.BatchNorm2d(c2)
         self.gate_act = nn.SiLU()
         self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
@@ -658,21 +656,26 @@ class StableDSU(nn.Module):
         # 1) 压缩
         x_low = self.compress(x)
 
-        # 2) FEM-style 并行上下文（唯一来源）
+        # 2) FEM-style 并行上下文
         y0 = self.p_b0(x_low)
         y1 = self.p_b1(x_low)
         y2 = self.p_b2(x_low)
         feat_parallel = self.p_fuse(torch.cat([y0, y1, y2], dim=1))
 
-        # 3) 生成 mask（E9 原样）
+        # 3) mask（tanh, centered）
         mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_parallel)))
         mask_low = torch.tanh(mask_raw)
 
-        # 4) 应用门控（E9 原样）
-        out_low = x_low * (1 + self.gamma * mask_low)
+        # =========================
+        # ✅ 关键：Residual-only gate（主干不被改写）
+        # 主干：保持 x_low
+        # 增强：来自 feat_parallel，并被 mask 控制
+        # =========================
+        enh_low = feat_parallel * (self.gamma * mask_low)   # 只有 residual 被 gate
+        out_low = x_low + enh_low
 
-        # 5) 上采样（E9 原样）
+        # 5) 上采样
         out = F.interpolate(out_low, scale_factor=self.scale, mode="bilinear", align_corners=False)
 
-        # 6) 残差锐化（E9 原样）
+        # 6) 残差锐化
         return out + self.refine_gamma * self.refine_conv(out)
