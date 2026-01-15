@@ -596,79 +596,101 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _make_gn(c, gn_groups=32):
-    # 让 groups 可整除通道数，避免报错
-    g = min(gn_groups, c)
-    while c % g != 0 and g > 1:
-        g -= 1
-    return nn.GroupNorm(g, c)
-
-
 class StableDSU(nn.Module):
     """
-    E10: Hybrid-Strip DSU (混合版)
-    结构：融合三种感受野提取方式，生成更鲁棒的 Mask。
-    分支1: 3x3 普通Conv（局部密集）
-    分支2: 1x5 -> 5x1（串行，模拟 5x5 满感受野）
-    分支3: 1x7 + 7x1（并行，十字形轴向特征）
+    E9-FFCA-Parallel-Only
+    改动点（唯一）：
+    - 删除串行 1x5 -> 5x1
+    - mask 完全由 FFCA 风格并行分支生成
+    其余：BN / SiLU / tanh / gamma / refine / upsample 全部保持 E9
     """
 
-    def __init__(self, c1, c2, scale=2, norm="gn", gn_groups=32):
+    def __init__(self, c1, c2, scale=2, dilation=2):
         super().__init__()
         self.scale = scale
 
-        # 1) 压缩
+        # 1. 压缩（不动）
         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
 
-        # Branch 1: 3x3 普通卷积（非 depthwise）
-        self.branch_local = nn.Conv2d(c2, c2, 3, padding=1, groups=1, bias=False)
+        # =====================================================
+        # ✅ FFCA 风格并行分支（唯一有效上下文来源）
+        # Branch1: 1x1 -> 3x3
+        self.p_b1 = nn.Sequential(
+            nn.Conv2d(c2, c2, 1, bias=False),
+            nn.Conv2d(c2, c2, 3, padding=1, bias=False),
+        )
 
-        # Branch 2: 串行 strip，1x5 -> 5x1（depthwise）
-        self.branch_serial_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
-        self.branch_serial_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
+        # Branch2: 1x1 -> 1x3 -> 3x1 -> atrous 3x3
+        self.p_b2 = nn.Sequential(
+            nn.Conv2d(c2, c2, 1, bias=False),
+            nn.Conv2d(c2, c2, (1, 3), padding=(0, 1), bias=False),
+            nn.Conv2d(c2, c2, (3, 1), padding=(1, 0), bias=False),
+            nn.Conv2d(c2, c2, 3,
+                      padding=dilation, dilation=dilation,
+                      bias=False),
+        )
 
-        # Branch 3: 并行 strip，1x7 + 7x1（depthwise）
-        self.branch_parallel_h = nn.Conv2d(c2, c2, (1, 7), padding=(0, 3), groups=c2, bias=False)
-        self.branch_parallel_v = nn.Conv2d(c2, c2, (7, 1), padding=(3, 0), groups=c2, bias=False)
+        # Branch3: 1x1 -> 3x1 -> 1x3 -> atrous 3x3
+        self.p_b3 = nn.Sequential(
+            nn.Conv2d(c2, c2, 1, bias=False),
+            nn.Conv2d(c2, c2, (3, 1), padding=(1, 0), bias=False),
+            nn.Conv2d(c2, c2, (1, 3), padding=(0, 1), bias=False),
+            nn.Conv2d(c2, c2, 3,
+                      padding=dilation, dilation=dilation,
+                      bias=False),
+        )
 
-        # gate norm
-        if norm.lower() == "bn":
-            self.gate_norm = nn.BatchNorm2d(c2)
-        else:
-            self.gate_norm = _make_gn(c2, gn_groups)
+        # Branch4: 1x1（轻分支）
+        self.p_b4 = nn.Conv2d(c2, c2, 1, bias=False)
 
+        # concat(4*c2) -> c2
+        self.p_fuse = nn.Conv2d(c2 * 4, c2, 1, bias=False)
+        # =====================================================
+
+        # 2. 门控生成（E9 原样）
+        self.gate_norm = nn.BatchNorm2d(c2)
         self.gate_act = nn.SiLU()
         self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
 
-        # E4 Trick: zero-init gamma
+        # 3. 稳定门控（E9 原样）
         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
-        # refine：DWConv residual sharpen（zero-init）
+        # 4. Refine（E9 原样）
         self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
         self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
     def forward(self, x):
-        # 1) 压缩
+        # 1. 压缩
         x_low = self.compress(x)
 
-        # 2) 多分支
-        feat_local = self.branch_local(x_low)
-        feat_serial = self.branch_serial_v(self.branch_serial_h(x_low))
-        feat_parallel = self.branch_parallel_h(x_low) + self.branch_parallel_v(x_low)
+        # =====================================================
+        # ✅ 只保留 FFCA 并行上下文
+        y1 = self.p_b1(x_low)
+        y2 = self.p_b2(x_low)
+        y3 = self.p_b3(x_low)
+        y4 = self.p_b4(x_low)
 
-        # 3) 融合
-        feat_combined = feat_local + feat_serial + feat_parallel
+        feat_parallel = self.p_fuse(torch.cat([y1, y2, y3, y4], dim=1))
+        # =====================================================
 
-        # 4) 生成 mask（可增强可抑制）
-        mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_combined)))
+        # 2. 生成 mask（E9 原样）
+        mask_raw = self.gate_fusion(
+            self.gate_act(
+                self.gate_norm(feat_parallel)
+            )
+        )
         mask_low = torch.tanh(mask_raw)
 
-        # 5) 门控（稳定起步）
+        # 3. 应用门控（E9 原样）
         out_low = x_low * (1 + self.gamma * mask_low)
 
-        # 6) 上采样
-        out = F.interpolate(out_low, scale_factor=self.scale, mode="bilinear", align_corners=False)
+        # 4. 上采样（E9 原样）
+        out = F.interpolate(
+            out_low,
+            scale_factor=self.scale,
+            mode='bilinear',
+            align_corners=False
+        )
 
-        # 7) 残差锐化（稳定起步）
-        out = out + self.refine_gamma * self.refine_conv(out)
-        return out
+        # 5. 残差锐化（E9 原样）
+        return out + self.refine_gamma * self.refine_conv(out)
