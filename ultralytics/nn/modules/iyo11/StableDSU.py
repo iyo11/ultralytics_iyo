@@ -510,80 +510,165 @@
 #################################################################################################
 ##E9
 #################################################################################################
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+#
+# class StableDSU(nn.Module):
+#     """
+#     E10: Hybrid-Strip DSU (混合版)
+#     结构：融合了三种不同的感受野提取方式，生成更鲁棒的 Mask。
+#     分支 1: 3x3 DWConv (局部密集)
+#     分支 2: 1x5 -> 5x1 (串行，模拟 5x5 满感受野)
+#     分支 3: 1x5 + 5x1 (并行，十字形轴向特征)
+#     """
+#
+#     def __init__(self, c1, c2, scale=2):
+#         super().__init__()
+#         self.scale = scale
+#
+#         # 1. 压缩 (Input Projection)
+#         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
+#
+#         # === Branch 1: 3x3 Local (局部特征) ===
+#         self.branch_local = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+#
+#         # === Branch 2: Serial Strip (串行：模拟大核) ===
+#         # 先扫横向，结果再扫纵向
+#         self.branch_serial_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
+#         self.branch_serial_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
+#
+#         # === Branch 3: Parallel Strip (并行：十字特征) ===
+#         # 独立的横向和纵向，保留轴向信息
+#         self.branch_parallel_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
+#         self.branch_parallel_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
+#
+#         # === 门控生成 (Mask Generation) ===
+#         self.gate_norm = nn.BatchNorm2d(c2)
+#         self.gate_act = nn.SiLU()
+#         self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
+#
+#         # E4 Trick: 零初始化 Gamma (控制门控初始权重)
+#         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+#
+#         # 3. 细节 Refine (残差锐化)
+#         self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+#         self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+#
+#     def forward(self, x):
+#         # 1. 降维
+#         x_low = self.compress(x)
+#
+#         # 2. 多分支特征提取
+#         # --- 分支1: 3x3 ---
+#         feat_local = self.branch_local(x_low)
+#
+#         # --- 分支2: 串行 (Serial) ---
+#         # 逻辑：Input -> [1x5] -> [5x1]
+#         feat_serial = self.branch_serial_v(self.branch_serial_h(x_low))
+#
+#         # --- 分支3: 并行 (Parallel) ---
+#         # 逻辑：Input -> [1x5] + Input -> [5x1]
+#         feat_parallel = self.branch_parallel_h(x_low) + self.branch_parallel_v(x_low)
+#
+#         # 3. 特征融合 (Sum Fusion)
+#         # 将三种视角的上下文叠加
+#         feat_combined = feat_local + feat_serial + feat_parallel
+#
+#         # 4. 生成 Mask
+#         mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_combined)))
+#         mask_low = torch.tanh(mask_raw)
+#
+#         # 5. 应用门控
+#         out_low = x_low * (1 + self.gamma * mask_low)
+#
+#         # 6. 上采样
+#         out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+#
+#         # 7. 残差锐化
+#         return out + self.refine_gamma * self.refine_conv(out)
+
+#################################################################################################
+##E9
+##################################################################################################
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def _make_gn(c, gn_groups=32):
+    # 让 groups 可整除通道数，避免报错
+    g = min(gn_groups, c)
+    while c % g != 0 and g > 1:
+        g -= 1
+    return nn.GroupNorm(g, c)
+
+
 class StableDSU(nn.Module):
     """
     E10: Hybrid-Strip DSU (混合版)
-    结构：融合了三种不同的感受野提取方式，生成更鲁棒的 Mask。
-    分支 1: 3x3 DWConv (局部密集)
-    分支 2: 1x5 -> 5x1 (串行，模拟 5x5 满感受野)
-    分支 3: 1x5 + 5x1 (并行，十字形轴向特征)
+    结构：融合三种感受野提取方式，生成更鲁棒的 Mask。
+    分支1: 3x3 普通Conv（局部密集）
+    分支2: 1x5 -> 5x1（串行，模拟 5x5 满感受野）
+    分支3: 1x7 + 7x1（并行，十字形轴向特征）
     """
 
-    def __init__(self, c1, c2, scale=2):
+    def __init__(self, c1, c2, scale=2, norm="gn", gn_groups=32):
         super().__init__()
         self.scale = scale
 
-        # 1. 压缩 (Input Projection)
+        # 1) 压缩
         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
 
-        # === Branch 1: 3x3 Local (局部特征) ===
-        self.branch_local = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+        # Branch 1: 3x3 普通卷积（非 depthwise）
+        self.branch_local = nn.Conv2d(c2, c2, 3, padding=1, groups=1, bias=False)
 
-        # === Branch 2: Serial Strip (串行：模拟大核) ===
-        # 先扫横向，结果再扫纵向
+        # Branch 2: 串行 strip，1x5 -> 5x1（depthwise）
         self.branch_serial_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
         self.branch_serial_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
 
-        # === Branch 3: Parallel Strip (并行：十字特征) ===
-        # 独立的横向和纵向，保留轴向信息
-        self.branch_parallel_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
-        self.branch_parallel_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
+        # Branch 3: 并行 strip，1x7 + 7x1（depthwise）
+        self.branch_parallel_h = nn.Conv2d(c2, c2, (1, 7), padding=(0, 3), groups=c2, bias=False)
+        self.branch_parallel_v = nn.Conv2d(c2, c2, (7, 1), padding=(3, 0), groups=c2, bias=False)
 
-        # === 门控生成 (Mask Generation) ===
-        self.gate_norm = nn.BatchNorm2d(c2)
+        # gate norm
+        if norm.lower() == "bn":
+            self.gate_norm = nn.BatchNorm2d(c2)
+        else:
+            self.gate_norm = _make_gn(c2, gn_groups)
+
         self.gate_act = nn.SiLU()
         self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
 
-        # E4 Trick: 零初始化 Gamma (控制门控初始权重)
+        # E4 Trick: zero-init gamma
         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
-        # 3. 细节 Refine (残差锐化)
+        # refine：DWConv residual sharpen（zero-init）
         self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
         self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
 
     def forward(self, x):
-        # 1. 降维
+        # 1) 压缩
         x_low = self.compress(x)
 
-        # 2. 多分支特征提取
-        # --- 分支1: 3x3 ---
+        # 2) 多分支
         feat_local = self.branch_local(x_low)
-
-        # --- 分支2: 串行 (Serial) ---
-        # 逻辑：Input -> [1x5] -> [5x1]
         feat_serial = self.branch_serial_v(self.branch_serial_h(x_low))
-
-        # --- 分支3: 并行 (Parallel) ---
-        # 逻辑：Input -> [1x5] + Input -> [5x1]
         feat_parallel = self.branch_parallel_h(x_low) + self.branch_parallel_v(x_low)
 
-        # 3. 特征融合 (Sum Fusion)
-        # 将三种视角的上下文叠加
+        # 3) 融合
         feat_combined = feat_local + feat_serial + feat_parallel
 
-        # 4. 生成 Mask
+        # 4) 生成 mask（可增强可抑制）
         mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_combined)))
         mask_low = torch.tanh(mask_raw)
 
-        # 5. 应用门控
+        # 5) 门控（稳定起步）
         out_low = x_low * (1 + self.gamma * mask_low)
 
-        # 6. 上采样
-        out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+        # 6) 上采样
+        out = F.interpolate(out_low, scale_factor=self.scale, mode="bilinear", align_corners=False)
 
-        # 7. 残差锐化
-        return out + self.refine_gamma * self.refine_conv(out)
+        # 7) 残差锐化（稳定起步）
+        out = out + self.refine_gamma * self.refine_conv(out)
+        return out
