@@ -443,69 +443,69 @@
 #################################################################################################
 ##E8  ########2222
 #################################################################################################
-# import torch
-# import torch.nn as nn
-# import torch.nn.functional as F
-#
-#
-# class StableDSU(nn.Module):
-#     """
-#     E9: Serial-Strip DSU (串联版)
-#     结构：Input -> [1x5 Conv] -> [5x1 Conv] -> ...
-#     效果：
-#     1. 感受野变成了实打实的满 5x5 矩形。
-#     2. 相比并行版，背景信息会被充分融合（对于纹理型目标可能更好）。
-#     """
-#
-#     def __init__(self, c1, c2, scale=2):
-#         super().__init__()
-#         self.scale = scale
-#
-#         # 1. 压缩
-#         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
-#
-#         # 2. 串联条形门控 (Sequential Strip Gating)
-#         # 第一步：横向扫 (1x5)
-#         self.gate_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
-#         # 第二步：纵向扫 (5x1)
-#         # 注意：这里把 gate_h 的输出作为输入，相当于把横向特征在纵向进行了扩散
-#         self.gate_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
-#
-#         # 门控激活与融合
-#         # 此时的特征已经具备了 5x5 的上下文
-#         self.gate_norm = nn.BatchNorm2d(c2)
-#         self.gate_act = nn.SiLU()
-#         self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
-#
-#         # E4 Trick: 零初始化 Gamma
-#         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
-#
-#         # 3. 细节 Refine (保持 E7 的残差结构，防止小目标丢失太严重)
-#         self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
-#         self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
-#
-#     def forward(self, x):
-#         x_low = self.compress(x)
-#
-#         # === 串联处理 (Serial) ===
-#         # 1. 先提取横向特征
-#         feat_h = self.gate_h(x_low)
-#         # 2. 基于横向特征，再提取纵向特征
-#         # 这一步完成后，feat_v 中的每个点都包含了原始 x_low 中 5x5 区域的信息
-#         feat_full = self.gate_v(feat_h)
-#
-#         # 生成 Mask
-#         mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_full)))
-#         mask_low = torch.tanh(mask_raw)
-#
-#         # 应用门控
-#         out_low = x_low * (1 + self.gamma * mask_low)
-#
-#         # 上采样
-#         out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
-#
-#         # 残差锐化
-#         return out + self.refine_gamma * self.refine_conv(out)
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class StableDSU(nn.Module):
+    """
+    E9: Serial-Strip DSU (串联版)
+    结构：Input -> [1x5 Conv] -> [5x1 Conv] -> ...
+    效果：
+    1. 感受野变成了实打实的满 5x5 矩形。
+    2. 相比并行版，背景信息会被充分融合（对于纹理型目标可能更好）。
+    """
+
+    def __init__(self, c1, c2, scale=2):
+        super().__init__()
+        self.scale = scale
+
+        # 1. 压缩
+        self.compress = nn.Conv2d(c1, c2, 1, bias=False)
+
+        # 2. 串联条形门控 (Sequential Strip Gating)
+        # 第一步：横向扫 (1x5)
+        self.gate_h = nn.Conv2d(c2, c2, (1, 5), padding=(0, 2), groups=c2, bias=False)
+        # 第二步：纵向扫 (5x1)
+        # 注意：这里把 gate_h 的输出作为输入，相当于把横向特征在纵向进行了扩散
+        self.gate_v = nn.Conv2d(c2, c2, (5, 1), padding=(2, 0), groups=c2, bias=False)
+
+        # 门控激活与融合
+        # 此时的特征已经具备了 5x5 的上下文
+        self.gate_norm = nn.BatchNorm2d(c2)
+        self.gate_act = nn.SiLU()
+        self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
+
+        # E4 Trick: 零初始化 Gamma
+        self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+
+        # 3. 细节 Refine (保持 E7 的残差结构，防止小目标丢失太严重)
+        self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+        self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+
+    def forward(self, x):
+        x_low = self.compress(x)
+
+        # === 串联处理 (Serial) ===
+        # 1. 先提取横向特征
+        feat_h = self.gate_h(x_low)
+        # 2. 基于横向特征，再提取纵向特征
+        # 这一步完成后，feat_v 中的每个点都包含了原始 x_low 中 5x5 区域的信息
+        feat_full = self.gate_v(feat_h)
+
+        # 生成 Mask
+        mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_full)))
+        mask_low = torch.tanh(mask_raw)
+
+        # 应用门控
+        out_low = x_low * (1 + self.gamma * mask_low)
+
+        # 上采样
+        out = F.interpolate(out_low, scale_factor=self.scale, mode='bilinear', align_corners=False)
+
+        # 残差锐化
+        return out + self.refine_gamma * self.refine_conv(out)
 
 #################################################################################################
 ##E9
@@ -591,91 +591,91 @@
 #################################################################################################
 ##E10
 ##################################################################################################
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-
-class StableDSU(nn.Module):
-    """
-    E9-FEM-Parallel-Only (Lite) + Residual-only Gate
-    - FEM-style 并行上下文分支：不动
-    - mask 生成：BN/SiLU/1x1 + tanh：不动
-    - 关键改动：gate 只做 residual，不改写主干 x_low
-    - refine：不动
-    """
-
-    def __init__(self, c1, c2, scale=2, dilation=5, map_reduce=8):
-        super().__init__()
-        self.scale = scale
-
-        # 1) 压缩
-        self.compress = nn.Conv2d(c1, c2, 1, bias=False)
-
-        # -----------------------------
-        # FEM-style 并行分支
-        # -----------------------------
-        inter = max(1, c2 // map_reduce)
-        inter2 = max(1, 2 * inter)
-        inter_mid = max(1, (inter // 2) * 3)
-
-        self.p_b0 = nn.Sequential(
-            nn.Conv2d(c2, inter2, 1, bias=False),
-            nn.Conv2d(inter2, inter2, 3, padding=1, bias=False),
-        )
-
-        self.p_b1 = nn.Sequential(
-            nn.Conv2d(c2, inter, 1, bias=False),
-            nn.Conv2d(inter, inter_mid, (1, 3), padding=(0, 1), bias=False),
-            nn.Conv2d(inter_mid, inter2, (3, 1), padding=(1, 0), bias=False),
-            nn.Conv2d(inter2, inter2, 3, padding=dilation, dilation=dilation, bias=False),
-        )
-
-        self.p_b2 = nn.Sequential(
-            nn.Conv2d(c2, inter, 1, bias=False),
-            nn.Conv2d(inter, inter_mid, (3, 1), padding=(1, 0), bias=False),
-            nn.Conv2d(inter_mid, inter2, (1, 3), padding=(0, 1), bias=False),
-            nn.Conv2d(inter2, inter2, 3, padding=dilation, dilation=dilation, bias=False),
-        )
-
-        self.p_fuse = nn.Conv2d(inter2 * 3, c2, 1, bias=False)
-
-        # 2) mask 生成（E9 原样）
-        self.gate_norm = nn.BatchNorm2d(c2)
-        self.gate_act = nn.SiLU()
-        self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
-
-        # 3) 稳定门控（E9 原样）
-        self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
-
-        # 4) Refine（E9 原样）
-        self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
-        self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
-
-    def forward(self, x):
-        # 1) 压缩
-        x_low = self.compress(x)
-
-        # 2) FEM-style 并行上下文
-        y0 = self.p_b0(x_low)
-        y1 = self.p_b1(x_low)
-        y2 = self.p_b2(x_low)
-        feat_parallel = self.p_fuse(torch.cat([y0, y1, y2], dim=1))
-
-        # 3) mask（tanh, centered）
-        mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_parallel)))
-        mask_low = torch.tanh(mask_raw)
-
-        # =========================
-        # ✅ 关键：Residual-only gate（主干不被改写）
-        # 主干：保持 x_low
-        # 增强：来自 feat_parallel，并被 mask 控制
-        # =========================
-        enh_low = feat_parallel * (self.gamma * mask_low)   # 只有 residual 被 gate
-        out_low = x_low + enh_low
-
-        # 5) 上采样
-        out = F.interpolate(out_low, scale_factor=self.scale, mode="bilinear", align_corners=False)
-
-        # 6) 残差锐化
-        return out + self.refine_gamma * self.refine_conv(out)
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
+#
+#
+# class StableDSU(nn.Module):
+#     """
+#     E9-FEM-Parallel-Only (Lite) + Residual-only Gate
+#     - FEM-style 并行上下文分支：不动
+#     - mask 生成：BN/SiLU/1x1 + tanh：不动
+#     - 关键改动：gate 只做 residual，不改写主干 x_low
+#     - refine：不动
+#     """
+#
+#     def __init__(self, c1, c2, scale=2, dilation=5, map_reduce=8):
+#         super().__init__()
+#         self.scale = scale
+#
+#         # 1) 压缩
+#         self.compress = nn.Conv2d(c1, c2, 1, bias=False)
+#
+#         # -----------------------------
+#         # FEM-style 并行分支
+#         # -----------------------------
+#         inter = max(1, c2 // map_reduce)
+#         inter2 = max(1, 2 * inter)
+#         inter_mid = max(1, (inter // 2) * 3)
+#
+#         self.p_b0 = nn.Sequential(
+#             nn.Conv2d(c2, inter2, 1, bias=False),
+#             nn.Conv2d(inter2, inter2, 3, padding=1, bias=False),
+#         )
+#
+#         self.p_b1 = nn.Sequential(
+#             nn.Conv2d(c2, inter, 1, bias=False),
+#             nn.Conv2d(inter, inter_mid, (1, 3), padding=(0, 1), bias=False),
+#             nn.Conv2d(inter_mid, inter2, (3, 1), padding=(1, 0), bias=False),
+#             nn.Conv2d(inter2, inter2, 3, padding=dilation, dilation=dilation, bias=False),
+#         )
+#
+#         self.p_b2 = nn.Sequential(
+#             nn.Conv2d(c2, inter, 1, bias=False),
+#             nn.Conv2d(inter, inter_mid, (3, 1), padding=(1, 0), bias=False),
+#             nn.Conv2d(inter_mid, inter2, (1, 3), padding=(0, 1), bias=False),
+#             nn.Conv2d(inter2, inter2, 3, padding=dilation, dilation=dilation, bias=False),
+#         )
+#
+#         self.p_fuse = nn.Conv2d(inter2 * 3, c2, 1, bias=False)
+#
+#         # 2) mask 生成（E9 原样）
+#         self.gate_norm = nn.BatchNorm2d(c2)
+#         self.gate_act = nn.SiLU()
+#         self.gate_fusion = nn.Conv2d(c2, c2, 1, bias=False)
+#
+#         # 3) 稳定门控（E9 原样）
+#         self.gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+#
+#         # 4) Refine（E9 原样）
+#         self.refine_conv = nn.Conv2d(c2, c2, 3, padding=1, groups=c2, bias=False)
+#         self.refine_gamma = nn.Parameter(torch.zeros(1, c2, 1, 1))
+#
+#     def forward(self, x):
+#         # 1) 压缩
+#         x_low = self.compress(x)
+#
+#         # 2) FEM-style 并行上下文
+#         y0 = self.p_b0(x_low)
+#         y1 = self.p_b1(x_low)
+#         y2 = self.p_b2(x_low)
+#         feat_parallel = self.p_fuse(torch.cat([y0, y1, y2], dim=1))
+#
+#         # 3) mask（tanh, centered）
+#         mask_raw = self.gate_fusion(self.gate_act(self.gate_norm(feat_parallel)))
+#         mask_low = torch.tanh(mask_raw)
+#
+#         # =========================
+#         # ✅ 关键：Residual-only gate（主干不被改写）
+#         # 主干：保持 x_low
+#         # 增强：来自 feat_parallel，并被 mask 控制
+#         # =========================
+#         enh_low = feat_parallel * (self.gamma * mask_low)   # 只有 residual 被 gate
+#         out_low = x_low + enh_low
+#
+#         # 5) 上采样
+#         out = F.interpolate(out_low, scale_factor=self.scale, mode="bilinear", align_corners=False)
+#
+#         # 6) 残差锐化
+#         return out + self.refine_gamma * self.refine_conv(out)

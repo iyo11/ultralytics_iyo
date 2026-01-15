@@ -31,14 +31,14 @@ backbone:
 # YOLOv11.0n head
 head:
   - [-1, 1, Conv, [256, 1, 1]]  # 11, Y5, lateral_convs.0
-  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
+  - [-1,1,StableDSU, [2]]
  
   - [6, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 13 input_proj.1
   - [[-2, -1], 1, Concat, [1]]
   - [-1, 2, C3k2, [256, False]] # 15, fpn_blocks.0
   - [-1, 1, Conv, [256, 1, 1]]  # 16, Y4, lateral_convs.1
  
-  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
+  - [-1,1,StableDSU, [2]]
   - [4, 1, Conv, [256, 1, 1, None, 1, 1, False]]  # 18 input_proj.0
   - [[-2, -1], 1, Concat, [1]]  # cat backbone P4
   - [-1, 2, C3k2, [256, False]]  # X3 (20), fpn_blocks.1
