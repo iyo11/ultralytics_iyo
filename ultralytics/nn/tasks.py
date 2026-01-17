@@ -91,6 +91,7 @@ from ultralytics.nn.modules.iyo11.BHFM import BHFM
 from ultralytics.nn.modules.iyo11.C2LGA import Light_LGA_SDPA, C2LGA
 from ultralytics.nn.modules.iyo11.C2LGAv2 import C2LGA_V2
 from ultralytics.nn.modules.iyo11.C3LGPSA import C3LGPSA, LGA_SDPA
+from ultralytics.nn.modules.iyo11.CGB import ContextGuidedBlock_Down
 from ultralytics.nn.modules.iyo11.CrossAxisAttention import CrossAxisAttention
 from ultralytics.nn.modules.iyo11.MultiScaleAdaptiveWindowAttention import MultiScaleAdaptiveWindowAttention
 from ultralytics.nn.modules.iyo11.PolaLinearAttention import PolaLinearAttention, C2PSA_PLA, C3k2_PolaLinearAttention
@@ -1698,7 +1699,8 @@ def parse_model(d, ch, verbose=True):
             TripletAttention,
             C2PSA_TripleAttention,
             StableDSU,
-            CrossAxisAttention
+            CrossAxisAttention,
+            ContextGuidedBlock_Down
         }
     )
 
@@ -1767,7 +1769,8 @@ def parse_model(d, ch, verbose=True):
             C3k2_ScConv,
             Dy_Sample,
             C3k2_BFAM_1,
-            C3k2_BFAM_2
+            C3k2_BFAM_2,
+            ContextGuidedBlock_Down
         }
     )
 
