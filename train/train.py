@@ -44,7 +44,7 @@ if __name__ == '__main__':
                 amp=False,  # 如果出现训练损失为Nan可以关闭amp
                 patience=0,
                 project='../runs/train',
-                name='v11n_CrossAxisAttention_NWPU_300',
+                name='v11n_CrossAndC2PSA_NWPU_300',
                 #save_period=20,
                 #固定随机种子
                 seed=42
